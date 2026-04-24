@@ -1,0 +1,32 @@
+{
+  "name": "personal-ai-companion-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "ios": "expo run:ios",
+    "android": "expo run:android",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@react-three/fiber": "^9.1.2",
+    "expo": "latest",
+    "expo-av": "latest",
+    "expo-file-system": "latest",
+    "expo-router": "latest",
+    "expo-speech": "latest",
+    "lucide-react-native": "^1.9.0",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-native": "latest",
+    "react-native-svg": "^15.15.4",
+    "react-native-web": "latest",
+    "three": "^0.169.0",
+    "zustand": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "typescript": "latest"
+  }
+}
