@@ -37,4 +37,5 @@ packages = [
   "proactive",
   "sensory",
   "tasks",
+  "tools",
 ]

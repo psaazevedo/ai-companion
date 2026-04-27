@@ -8,6 +8,7 @@ from memory.service import get_memory_service
 from models.agent import AgentResponse, Assessment, DialogueSignals
 from models.memory import RetrievedMemory
 from sensory.service import ContextualState, get_contextual_state_service
+from tools.internet import ExternalContext, get_internet_tool_service
 
 SYSTEM_PROMPT = """
 You are a personal AI companion.
@@ -24,6 +25,7 @@ class AgentOrchestrator:
         self.voice = VoiceProcessor()
         self.memory = get_memory_service()
         self.contextual_state = get_contextual_state_service()
+        self.internet = get_internet_tool_service()
 
     async def process_input(
         self,
@@ -31,12 +33,16 @@ class AgentOrchestrator:
         user_input: Optional[str] = None,
         audio_data: Optional[bytes] = None,
         audio_filename: Optional[str] = None,
+        conversation_mode: str = "general",
+        visibility_scope: Optional[str] = None,
+        allowed_modes: Optional[list[str]] = None,
     ) -> AgentResponse:
         prepared = await self._prepare_turn(
             user_id=user_id,
             user_input=user_input,
             audio_data=audio_data,
             audio_filename=audio_filename,
+            conversation_mode=conversation_mode,
         )
 
         text = await self.llm.complete(
@@ -50,6 +56,9 @@ class AgentOrchestrator:
             agent_response=text,
             assessment=prepared["assessment"],
             input_mode="voice" if audio_data is not None else "text",
+            conversation_mode=prepared["conversation_mode"],
+            visibility_scope=visibility_scope,
+            allowed_modes=allowed_modes,
         )
         dialogue_profile = await self.memory.dialogue_profile(prepared["user_id"])
 
@@ -70,12 +79,16 @@ class AgentOrchestrator:
         user_input: Optional[str] = None,
         audio_data: Optional[bytes] = None,
         audio_filename: Optional[str] = None,
+        conversation_mode: str = "general",
+        visibility_scope: Optional[str] = None,
+        allowed_modes: Optional[list[str]] = None,
     ) -> AsyncIterator[dict[str, Any]]:
         prepared = await self._prepare_turn(
             user_id=user_id,
             user_input=user_input,
             audio_data=audio_data,
             audio_filename=audio_filename,
+            conversation_mode=conversation_mode,
         )
         accumulated = ""
 
@@ -95,6 +108,9 @@ class AgentOrchestrator:
             agent_response=final_text,
             assessment=prepared["assessment"],
             input_mode="voice" if audio_data is not None else "text",
+            conversation_mode=prepared["conversation_mode"],
+            visibility_scope=visibility_scope,
+            allowed_modes=allowed_modes,
         )
         dialogue_profile = await self.memory.dialogue_profile(prepared["user_id"])
 
@@ -152,6 +168,7 @@ class AgentOrchestrator:
         user_input: Optional[str] = None,
         audio_data: Optional[bytes] = None,
         audio_filename: Optional[str] = None,
+        conversation_mode: str = "general",
     ) -> dict[str, Any]:
         transcript = (user_input or "").strip()
 
@@ -169,9 +186,14 @@ class AgentOrchestrator:
             user_id=user_id,
             query=transcript,
             assessment=assessment,
+            conversation_mode=conversation_mode,
         )
         contextual_state = await self.contextual_state.build_state(
             user_id=user_id,
+            assessment=assessment,
+        )
+        external_context = await self.internet.context_for_turn(
+            query=transcript,
             assessment=assessment,
         )
         prompt = self.build_prompt(
@@ -180,6 +202,8 @@ class AgentOrchestrator:
             assessment=assessment,
             memories=memories,
             contextual_state=contextual_state,
+            external_context=external_context,
+            conversation_mode=conversation_mode,
         )
 
         return {
@@ -187,6 +211,7 @@ class AgentOrchestrator:
             "transcript": transcript,
             "assessment": assessment,
             "prompt": prompt,
+            "conversation_mode": conversation_mode,
         }
 
     def analyze_dialogue_patterns(self, user_input: str) -> DialogueSignals:
@@ -286,11 +311,15 @@ class AgentOrchestrator:
         assessment: Assessment,
         memories: list[RetrievedMemory],
         contextual_state: ContextualState,
+        external_context: Optional[ExternalContext],
+        conversation_mode: str = "general",
     ) -> str:
         memory_section = self.format_memories(memories)
         contextual_state_section = self.format_contextual_state(contextual_state)
+        external_context_section = self.format_external_context(external_context)
         return f"""
 User ID: {user_id}
+Conversation mode: {conversation_mode}
 Assessment:
 - Stakes: {assessment.stakes}
 - Novelty: {assessment.novelty}
@@ -299,6 +328,9 @@ Assessment:
 
 Current contextual state:
 {contextual_state_section}
+
+External information:
+{external_context_section}
 
 Memory layers in play:
 {memory_section}
@@ -309,6 +341,9 @@ Current user message:
 Respond naturally. Keep it concise, warm, and honest.
 If the input touches a high-stakes domain, be more careful and explicit about uncertainty.
 Use relevant memory naturally, but do not force it into every reply.
+Use external information when present, but keep it separate from personal memory.
+When external information has source URLs, cite the source naturally in text.
+If external information says live web access is unavailable, say that plainly instead of inventing current facts.
 Use the contextual state to calibrate tone:
 - grounding = calmer, simpler, more regulating
 - direct = crisp and low-friction
@@ -321,13 +356,25 @@ Do not mistake hesitation, self-correction, or a winding preamble for lack of cl
         if not memories:
             return "- No strongly relevant memories surfaced yet."
 
-        lines = []
+        mention_lines = []
+        silent_lines = []
         for memory in memories:
             label = memory.kind.capitalize()
             confidence = self._memory_confidence_label(memory.confidence)
             provenance = f" [{confidence} confidence]" if confidence else ""
-            lines.append(f"- {label}{provenance}: {memory.content}")
-        return "\n".join(lines)
+            reason = f" ({memory.relevance_reason})" if memory.relevance_reason else ""
+            line = f"- {label}{provenance}: {memory.content}{reason}"
+            if memory.use == "silent":
+                silent_lines.append(line)
+            else:
+                mention_lines.append(line)
+
+        sections = []
+        if mention_lines:
+            sections.append("Mention naturally only if useful:\n" + "\n".join(mention_lines))
+        if silent_lines:
+            sections.append("Use silently to shape tone/strategy; do not quote unless directly asked:\n" + "\n".join(silent_lines))
+        return "\n\n".join(sections)
 
     def format_contextual_state(self, contextual_state: ContextualState) -> str:
         lines = [
@@ -338,6 +385,23 @@ Do not mistake hesitation, self-correction, or a winding preamble for lack of cl
             f"- Suggested pause tolerance: {contextual_state.pause_tolerance_seconds:.2f} seconds",
         ]
         lines.extend(f"- Note: {note}" for note in contextual_state.notes)
+        return "\n".join(lines)
+
+    def format_external_context(self, external_context: Optional[ExternalContext]) -> str:
+        if not external_context:
+            return "- No external lookup was needed for this turn."
+
+        lines = [
+            f"- Tool: {external_context.kind}",
+            f"- Provider: {external_context.source}",
+            f"- Query: {external_context.query}",
+            f"- Fetched at: {external_context.fetched_at}",
+            f"- Confidence: {external_context.confidence:.2f}",
+        ]
+        if external_context.error:
+            lines.append(f"- Tool status: {external_context.error}")
+        lines.append("- Results:")
+        lines.extend(f"  {line}" for line in external_context.summary.splitlines())
         return "\n".join(lines)
 
     def _memory_confidence_label(self, confidence: Optional[float]) -> Optional[str]:

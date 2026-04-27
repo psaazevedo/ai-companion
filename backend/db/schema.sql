@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS episodes (
     archive_reason TEXT,
     archived_at TIMESTAMPTZ,
     input_mode TEXT NOT NULL DEFAULT 'voice',
+    conversation_mode TEXT NOT NULL DEFAULT 'general',
+    visibility_scope TEXT NOT NULL DEFAULT 'global',
+    allowed_modes TEXT[] NOT NULL DEFAULT '{}',
+    restricted_reason TEXT,
     dialogue_signals JSONB NOT NULL DEFAULT '{}'::jsonb,
     embedding VECTOR(__EMBEDDING_DIMENSIONS__),
     search_tsv tsvector GENERATED ALWAYS AS (
@@ -46,11 +50,16 @@ CREATE TABLE IF NOT EXISTS semantic_memories (
     fact_key TEXT,
     confidence DOUBLE PRECISION NOT NULL DEFAULT 0.7,
     reinforcement_count INTEGER NOT NULL DEFAULT 1,
+    private_reinforcement_count INTEGER NOT NULL DEFAULT 0,
     recall_count INTEGER NOT NULL DEFAULT 0,
     memory_status TEXT NOT NULL DEFAULT 'active',
     archive_reason TEXT,
     archived_at TIMESTAMPTZ,
     source_episode_ids TEXT[] NOT NULL DEFAULT '{}',
+    conversation_mode TEXT NOT NULL DEFAULT 'general',
+    visibility_scope TEXT NOT NULL DEFAULT 'global',
+    allowed_modes TEXT[] NOT NULL DEFAULT '{}',
+    restricted_reason TEXT,
     valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     valid_to TIMESTAMPTZ,
     superseded_by UUID,
@@ -68,11 +77,16 @@ CREATE TABLE IF NOT EXISTS procedural_memories (
     pattern_key TEXT,
     confidence DOUBLE PRECISION NOT NULL DEFAULT 0.7,
     reinforcement_count INTEGER NOT NULL DEFAULT 1,
+    private_reinforcement_count INTEGER NOT NULL DEFAULT 0,
     recall_count INTEGER NOT NULL DEFAULT 0,
     memory_status TEXT NOT NULL DEFAULT 'active',
     archive_reason TEXT,
     archived_at TIMESTAMPTZ,
     source_episode_ids TEXT[] NOT NULL DEFAULT '{}',
+    conversation_mode TEXT NOT NULL DEFAULT 'general',
+    visibility_scope TEXT NOT NULL DEFAULT 'global',
+    allowed_modes TEXT[] NOT NULL DEFAULT '{}',
+    restricted_reason TEXT,
     valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     valid_to TIMESTAMPTZ,
     superseded_by UUID,
@@ -89,6 +103,9 @@ CREATE TABLE IF NOT EXISTS graph_nodes (
     label TEXT NOT NULL,
     node_type TEXT NOT NULL DEFAULT 'concept',
     properties JSONB NOT NULL DEFAULT '{}'::jsonb,
+    visibility_scope TEXT NOT NULL DEFAULT 'global',
+    allowed_modes TEXT[] NOT NULL DEFAULT '{}',
+    restricted_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(user_id, label)
 );
@@ -102,6 +119,10 @@ CREATE TABLE IF NOT EXISTS graph_edges (
     weight DOUBLE PRECISION NOT NULL DEFAULT 0.4,
     recall_count INTEGER NOT NULL DEFAULT 0,
     source_episode_ids TEXT[] NOT NULL DEFAULT '{}',
+    conversation_mode TEXT NOT NULL DEFAULT 'general',
+    visibility_scope TEXT NOT NULL DEFAULT 'global',
+    allowed_modes TEXT[] NOT NULL DEFAULT '{}',
+    restricted_reason TEXT,
     edge_status TEXT NOT NULL DEFAULT 'active',
     valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     valid_to TIMESTAMPTZ,
@@ -120,6 +141,9 @@ CREATE TABLE IF NOT EXISTS proactive_insights (
     importance DOUBLE PRECISION NOT NULL DEFAULT 0.5,
     status TEXT NOT NULL DEFAULT 'pending',
     source_memory_ids TEXT[] NOT NULL DEFAULT '{}',
+    conversation_mode TEXT NOT NULL DEFAULT 'general',
+    visibility_scope TEXT NOT NULL DEFAULT 'global',
+    allowed_modes TEXT[] NOT NULL DEFAULT '{}',
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -136,17 +160,186 @@ CREATE TABLE IF NOT EXISTS background_job_runs (
     finished_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS memory_mutations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id TEXT NOT NULL,
+    memory_layer TEXT NOT NULL,
+    memory_id UUID,
+    action TEXT NOT NULL,
+    reason TEXT,
+    source_episode_id TEXT,
+    from_status TEXT,
+    to_status TEXT,
+    conversation_mode TEXT NOT NULL DEFAULT 'general',
+    visibility_scope TEXT NOT NULL DEFAULT 'global',
+    allowed_modes TEXT[] NOT NULL DEFAULT '{}',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Compatibility migrations must run before indexes because older databases
+-- may not have newer columns yet.
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS dialogue_signals JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS input_mode TEXT NOT NULL DEFAULT 'voice';
+
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS conversation_mode TEXT NOT NULL DEFAULT 'general';
+
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS restricted_reason TEXT;
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS fact_key TEXT;
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS recall_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS private_reinforcement_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS archive_reason TEXT;
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS valid_to TIMESTAMPTZ;
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS superseded_by UUID;
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS conversation_mode TEXT NOT NULL DEFAULT 'general';
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS restricted_reason TEXT;
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS pattern_key TEXT;
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS recall_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS private_reinforcement_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS archive_reason TEXT;
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS valid_to TIMESTAMPTZ;
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS superseded_by UUID;
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS conversation_mode TEXT NOT NULL DEFAULT 'general';
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS restricted_reason TEXT;
+
+ALTER TABLE graph_nodes
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE graph_nodes
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE graph_nodes
+    ADD COLUMN IF NOT EXISTS restricted_reason TEXT;
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS recall_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS source_episode_ids TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS conversation_mode TEXT NOT NULL DEFAULT 'general';
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS restricted_reason TEXT;
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS edge_status TEXT NOT NULL DEFAULT 'active';
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS valid_to TIMESTAMPTZ;
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE proactive_insights
+    ADD COLUMN IF NOT EXISTS conversation_mode TEXT NOT NULL DEFAULT 'general';
+
+ALTER TABLE proactive_insights
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE proactive_insights
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
 CREATE INDEX IF NOT EXISTS idx_episodes_user_time
     ON episodes(user_id, timestamp DESC);
 
 CREATE INDEX IF NOT EXISTS idx_episodes_user_status
     ON episodes(user_id, memory_status);
 
+CREATE INDEX IF NOT EXISTS idx_episodes_user_scope
+    ON episodes(user_id, visibility_scope, conversation_mode);
+
 CREATE INDEX IF NOT EXISTS idx_semantic_user_status
     ON semantic_memories(user_id, memory_status);
 
+CREATE INDEX IF NOT EXISTS idx_semantic_user_scope
+    ON semantic_memories(user_id, visibility_scope, conversation_mode);
+
 CREATE INDEX IF NOT EXISTS idx_procedural_user_status
     ON procedural_memories(user_id, memory_status);
+
+CREATE INDEX IF NOT EXISTS idx_procedural_user_scope
+    ON procedural_memories(user_id, visibility_scope, conversation_mode);
 
 CREATE INDEX IF NOT EXISTS idx_graph_nodes_user_label
     ON graph_nodes(user_id, label);
@@ -159,6 +352,12 @@ CREATE INDEX IF NOT EXISTS idx_proactive_insights_user_status
 
 CREATE INDEX IF NOT EXISTS idx_background_job_runs_job_name
     ON background_job_runs(job_name, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_memory_mutations_user_created
+    ON memory_mutations(user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_memory_mutations_memory
+    ON memory_mutations(memory_layer, memory_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_episodes_search_tsv
     ON episodes USING GIN(search_tsv);
@@ -187,11 +386,26 @@ ALTER TABLE episodes
 ALTER TABLE episodes
     ADD COLUMN IF NOT EXISTS input_mode TEXT NOT NULL DEFAULT 'voice';
 
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS conversation_mode TEXT NOT NULL DEFAULT 'general';
+
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE episodes
+    ADD COLUMN IF NOT EXISTS restricted_reason TEXT;
+
 ALTER TABLE semantic_memories
     ADD COLUMN IF NOT EXISTS fact_key TEXT;
 
 ALTER TABLE semantic_memories
     ADD COLUMN IF NOT EXISTS recall_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS private_reinforcement_count INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE semantic_memories
     ADD COLUMN IF NOT EXISTS archive_reason TEXT;
@@ -207,6 +421,18 @@ ALTER TABLE semantic_memories
 
 ALTER TABLE semantic_memories
     ADD COLUMN IF NOT EXISTS superseded_by UUID;
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS conversation_mode TEXT NOT NULL DEFAULT 'general';
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE semantic_memories
+    ADD COLUMN IF NOT EXISTS restricted_reason TEXT;
 
 ALTER TABLE procedural_memories
     ADD COLUMN IF NOT EXISTS pattern_key TEXT;
@@ -215,6 +441,9 @@ ALTER TABLE procedural_memories
     ADD COLUMN IF NOT EXISTS recall_count INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS private_reinforcement_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE procedural_memories
     ADD COLUMN IF NOT EXISTS archive_reason TEXT;
 
 ALTER TABLE procedural_memories
@@ -229,11 +458,44 @@ ALTER TABLE procedural_memories
 ALTER TABLE procedural_memories
     ADD COLUMN IF NOT EXISTS superseded_by UUID;
 
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS conversation_mode TEXT NOT NULL DEFAULT 'general';
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE procedural_memories
+    ADD COLUMN IF NOT EXISTS restricted_reason TEXT;
+
+ALTER TABLE graph_nodes
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE graph_nodes
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE graph_nodes
+    ADD COLUMN IF NOT EXISTS restricted_reason TEXT;
+
 ALTER TABLE graph_edges
     ADD COLUMN IF NOT EXISTS recall_count INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE graph_edges
     ADD COLUMN IF NOT EXISTS source_episode_ids TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS conversation_mode TEXT NOT NULL DEFAULT 'general';
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
+
+ALTER TABLE graph_edges
+    ADD COLUMN IF NOT EXISTS restricted_reason TEXT;
 
 ALTER TABLE graph_edges
     ADD COLUMN IF NOT EXISTS edge_status TEXT NOT NULL DEFAULT 'active';
@@ -246,6 +508,15 @@ ALTER TABLE graph_edges
 
 ALTER TABLE graph_edges
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE proactive_insights
+    ADD COLUMN IF NOT EXISTS conversation_mode TEXT NOT NULL DEFAULT 'general';
+
+ALTER TABLE proactive_insights
+    ADD COLUMN IF NOT EXISTS visibility_scope TEXT NOT NULL DEFAULT 'global';
+
+ALTER TABLE proactive_insights
+    ADD COLUMN IF NOT EXISTS allowed_modes TEXT[] NOT NULL DEFAULT '{}';
 
 CREATE INDEX IF NOT EXISTS idx_semantic_user_fact_key
     ON semantic_memories(user_id, fact_key);
@@ -261,6 +532,9 @@ CREATE INDEX IF NOT EXISTS idx_procedural_user_validity
 
 CREATE INDEX IF NOT EXISTS idx_graph_edges_user_status
     ON graph_edges(user_id, edge_status, last_seen DESC);
+
+CREATE INDEX IF NOT EXISTS idx_graph_edges_user_scope
+    ON graph_edges(user_id, visibility_scope, conversation_mode);
 
 CREATE INDEX IF NOT EXISTS idx_dialogue_profiles_last_updated
     ON dialogue_profiles(last_updated DESC);

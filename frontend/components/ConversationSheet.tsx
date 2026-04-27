@@ -65,8 +65,39 @@ export function ConversationSheet({
     }
 
     const timeout = setTimeout(() => {
-      scrollRef.current?.scrollToEnd({ animated: false });
-      inputRef.current?.focus();
+      if (Platform.OS === "web" && typeof window !== "undefined") {
+        const keepAppCanvasPinned = () => {
+          window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+          document.scrollingElement?.scrollTo?.(0, 0);
+          document.documentElement.scrollTop = 0;
+          document.body.scrollTop = 0;
+          const appRoot =
+            document.getElementById("root") ??
+            document.getElementById("__next") ??
+            (document.body.firstElementChild instanceof HTMLElement
+              ? document.body.firstElementChild
+              : null);
+          if (appRoot) {
+            appRoot.scrollTop = 0;
+          }
+        };
+        scrollRef.current?.scrollToEnd({ animated: false });
+        (inputRef.current as { focus?: (options?: FocusOptions) => void } | null)?.focus?.({
+          preventScroll: true,
+        });
+        window.requestAnimationFrame(keepAppCanvasPinned);
+        setTimeout(() => {
+          scrollRef.current?.scrollToEnd({ animated: false });
+          keepAppCanvasPinned();
+        }, 60);
+        setTimeout(() => {
+          scrollRef.current?.scrollToEnd({ animated: false });
+          keepAppCanvasPinned();
+        }, 180);
+      } else {
+        scrollRef.current?.scrollToEnd({ animated: false });
+        inputRef.current?.focus();
+      }
     }, 120);
 
     return () => clearTimeout(timeout);
@@ -98,38 +129,45 @@ export function ConversationSheet({
     turns.length === 0 &&
     !pendingUserText &&
     !responsePreview;
+  const latestAssistantTurn = useMemo(
+    () => [...turns].reverse().find((turn) => turn.role === "assistant"),
+    [turns]
+  );
+  const previewDuplicatesLatestTurn =
+    Boolean(responsePreview.trim()) &&
+    latestAssistantTurn?.text.trim() === responsePreview.trim();
+  const showResponsePreview = Boolean(responsePreview.trim()) && !previewDuplicatesLatestTurn;
 
   return (
     <Animated.View
       pointerEvents={visible ? "auto" : "none"}
       style={[
         styles.modeShellWrap,
+        Platform.OS === "web" ? styles.modeShellWrapWeb : null,
+        !visible ? styles.modeShellHidden : null,
+        visible ? styles.modeShellVisible : null,
         {
           opacity: progress.interpolate({
-            inputRange: [0, 0.28, 1],
-            outputRange: [0, 0.18, 1],
+            inputRange: [0, 0.58, 1],
+            outputRange: [0, 0, 1],
           }),
-          transform: [
-            {
-              translateY: progress.interpolate({
-                inputRange: [0, 1],
-                outputRange: [84, 0],
-              }),
-            },
-            {
-              scale: progress.interpolate({
-                inputRange: [0, 1],
-                outputRange: [0.97, 1],
-              }),
-            },
-          ],
         },
       ]}
     >
       <View style={styles.modeShell}>
         <ScrollView
           ref={scrollRef}
-          style={styles.streamScroll}
+          style={[
+            styles.streamScroll,
+            Platform.OS === "web"
+              ? ({
+                  overflowY: "auto",
+                  overflowX: "hidden",
+                  overscrollBehavior: "contain",
+                  WebkitOverflowScrolling: "touch",
+                } as never)
+              : null,
+          ]}
           contentContainerStyle={styles.streamContent}
           showsVerticalScrollIndicator={false}
         >
@@ -210,7 +248,7 @@ export function ConversationSheet({
                 </RevealRow>
               ) : null}
 
-              {responsePreview ? (
+              {showResponsePreview ? (
                 <RevealRow style={[styles.storyRow, styles.storyRowAssistant]}>
                   <Animated.View
                     style={[
@@ -223,9 +261,6 @@ export function ConversationSheet({
                       <Text style={[styles.storyRole, styles.storyRoleAssistant]}>Companion</Text>
                       <View style={styles.storyMetaRight}>
                         <ModeTag mode={isSpeaking ? "voice" : "text"} />
-                        <Text style={styles.previewLabel}>
-                          {isThinking ? "Thinking" : isSpeaking ? "Replying" : "Streaming"}
-                        </Text>
                       </View>
                     </View>
                     <Text style={[styles.storyText, styles.storyTextAssistant]}>{responsePreview}</Text>
@@ -358,37 +393,57 @@ function ModeTag({ mode }: { mode: "voice" | "text" | string }) {
 
 const styles = StyleSheet.create({
   modeShellWrap: {
-    flex: 1,
+    position: "absolute",
+    top: 136,
+    left: 0,
+    right: 0,
+    bottom: 112,
     width: "100%",
     maxWidth: 980,
     alignSelf: "center",
-    marginTop: -76,
+    marginTop: 0,
     paddingTop: 0,
-    position: "relative",
-    zIndex: 1,
+    zIndex: 22,
+  },
+  modeShellWrapWeb: {
+    height: "calc(100vh - 248px)" as never,
+    maxHeight: "calc(100vh - 248px)" as never,
+  },
+  modeShellHidden: {
+    display: "none",
+  },
+  modeShellVisible: {
+    opacity: 1,
   },
   modeShell: {
     flex: 1,
-    backgroundColor: "transparent",
+    height: "100%" as never,
+    minHeight: 0,
+    backgroundColor: "#080B14",
     overflow: "hidden",
+    position: "relative",
+    flexDirection: "column",
   },
   streamScroll: {
     flex: 1,
+    flexBasis: 0,
+    minHeight: 0,
+    flexShrink: 1,
   },
   topFade: {
     position: "absolute",
     top: 0,
     left: 0,
     right: 0,
-    height: 100,
-    zIndex: 3,
+    height: 112,
+    zIndex: 6,
     backgroundImage:
-      "linear-gradient(180deg, #080B14 0%, rgba(8, 11, 20, 0.86) 38%, rgba(8, 11, 20, 0) 100%)",
+      "linear-gradient(180deg, #080B14 0%, rgba(8, 11, 20, 0.92) 28%, rgba(8, 11, 20, 0.56) 64%, rgba(8, 11, 20, 0) 100%)",
   },
   streamContent: {
     paddingHorizontal: 18,
-    paddingTop: 72,
-    paddingBottom: 18,
+    paddingTop: 86,
+    paddingBottom: 22,
     flexGrow: 1,
   },
   statusText: {
@@ -534,9 +589,11 @@ const styles = StyleSheet.create({
   },
   composerDock: {
     paddingHorizontal: 18,
-    paddingBottom: 96,
-    paddingTop: 4,
-    backgroundColor: "transparent",
+    paddingBottom: 10,
+    paddingTop: 10,
+    backgroundColor: "#080B14",
+    flexShrink: 0,
+    zIndex: 8,
   },
   composerShell: {
     minHeight: 76,

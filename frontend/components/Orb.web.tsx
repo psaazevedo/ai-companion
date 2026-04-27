@@ -74,14 +74,14 @@ const MODE_CONFIG: Record<OrbMode, OrbConfig> = {
     swirl: 0.02,
   },
   listening: {
-    radiusScale: 0.885,
-    spin: 0.22,
-    turbulence: 0.078,
-    shellWave: 0.06,
-    spray: 0.36,
-    glow: 0.95,
-    audioResponse: 0.22,
-    swirl: 0.05,
+    radiusScale: 0.872,
+    spin: 0.18,
+    turbulence: 0.046,
+    shellWave: 0.04,
+    spray: 0.21,
+    glow: 0.72,
+    audioResponse: 0.24,
+    swirl: 0.035,
   },
   thinking: {
     radiusScale: 0.848,
@@ -194,9 +194,8 @@ export function Orb({
   }, [insightOpen]);
 
   const stageSize = useMemo(() => {
-    const eased = smoothstep(clamp(modeProgress, 0, 1));
-    return lerp(560, 92, eased);
-  }, [modeProgress]);
+    return 560;
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;

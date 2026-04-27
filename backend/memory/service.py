@@ -27,6 +27,15 @@ class RetrievalPlan:
     graph_weight: float = 1.0
 
 
+@dataclass(frozen=True)
+class RetrievalIntent:
+    name: str
+    mention_kinds: tuple[str, ...]
+    silent_kinds: tuple[str, ...]
+    mention_limit: int = 4
+    silent_limit: int = 3
+
+
 @dataclass
 class SemanticCandidate:
     category: str
@@ -35,11 +44,75 @@ class SemanticCandidate:
     confidence: float = 0.72
 
 
+SEMANTIC_CANONICAL_FAMILIES = {
+    "project:primary": {
+        "content": "User is building an extraordinary personal AI companion.",
+        "category": "project",
+        "keywords": [
+            "ai companion",
+            "personal ai companion",
+            "autonomous ai agent",
+            "advanced memory system",
+            "human like friend",
+            "human-like friend",
+            "samantha",
+            "jarvis",
+        ],
+    },
+    "preference:communication_style": {
+        "content": "User prefers direct, concise communication.",
+        "category": "preference",
+        "keywords": [
+            "direct communication",
+            "direct + concise",
+            "direct concise",
+            "answer directly",
+            "answers directly",
+            "answer clearly",
+            "concise answers",
+            "keep it concise",
+        ],
+    },
+    "preference:stress_response_style": {
+        "content": "When things feel heavy, the user benefits from short, calm, grounding responses.",
+        "category": "preference",
+        "keywords": [
+            "grounding support",
+            "stay short and grounding",
+            "when the user is stressed",
+            "when things feel heavy",
+            "concise answers under stress",
+            "calm grounding",
+            "grounding responses",
+        ],
+    },
+    "procedure:direct_concise_response": {
+        "content": "Default to direct, concise communication unless the user asks for more depth.",
+        "category": "procedure",
+        "keywords": [
+            "direct + concise",
+            "answer directly first",
+            "default to direct",
+            "concise communication",
+            "direct communication and concise answers",
+        ],
+    },
+}
+
+
 @dataclass
 class ProceduralCandidate:
     pattern_key: str
     content: str
     confidence: float = 0.68
+
+
+@dataclass(frozen=True)
+class MemoryScope:
+    conversation_mode: str = "general"
+    visibility_scope: str = "global"
+    allowed_modes: tuple[str, ...] = ()
+    restricted_reason: Optional[str] = None
 
 
 STOPWORDS = {
@@ -94,7 +167,9 @@ class LayeredMemoryService:
         query: str,
         limit: int = 6,
         assessment: Optional[Assessment] = None,
+        conversation_mode: str = "general",
     ) -> List[RetrievedMemory]:
+        current_mode = self._normalize_mode(conversation_mode)
         plan = self._build_retrieval_plan(query, assessment)
         query_vector = vector_literal(await self.embeddings.embed_text(query))
         results: List[RetrievedMemory] = []
@@ -106,6 +181,7 @@ class LayeredMemoryService:
             limit=plan.episodic_limit,
             include_archived=plan.include_archived,
             status_values=None,
+            current_mode=current_mode,
         )
         semantic = await self._retrieve_semantic(
             user_id=user_id,
@@ -114,6 +190,7 @@ class LayeredMemoryService:
             limit=plan.semantic_limit,
             include_archived=plan.include_archived,
             status_values=None,
+            current_mode=current_mode,
         )
         procedural = await self._retrieve_procedural(
             user_id=user_id,
@@ -122,8 +199,14 @@ class LayeredMemoryService:
             limit=plan.procedural_limit,
             include_archived=plan.include_archived,
             status_values=None,
+            current_mode=current_mode,
         )
-        graph = await self._retrieve_graph(user_id=user_id, query=query, limit=plan.graph_limit)
+        graph = await self._retrieve_graph(
+            user_id=user_id,
+            query=query,
+            limit=plan.graph_limit,
+            current_mode=current_mode,
+        )
 
         results.extend(self._rebalance_scores(episodic, plan.episodic_weight, query, assessment))
         results.extend(self._rebalance_scores(semantic, plan.semantic_weight, query, assessment))
@@ -136,6 +219,7 @@ class LayeredMemoryService:
             query_vector=query_vector,
             limit=plan.reactivation_limit,
             assessment=assessment,
+            current_mode=current_mode,
         )
         results.extend(reactivated)
 
@@ -149,12 +233,19 @@ class LayeredMemoryService:
                 continue
             seen.add(key)
             deduped.append(item)
-            if len(deduped) >= limit:
+            if len(deduped) >= max(limit * 3, 12):
                 break
 
-        await self._reactivate_memories(deduped)
-        await self._mark_recalled(deduped)
-        return deduped
+        selected = self._select_memories_for_prompt(
+            deduped,
+            query=query,
+            assessment=assessment,
+            limit=limit,
+        )
+
+        await self._reactivate_memories(selected)
+        await self._mark_recalled(selected)
+        return selected
 
     async def store_interaction(
         self,
@@ -163,7 +254,16 @@ class LayeredMemoryService:
         agent_response: str,
         assessment: Assessment,
         input_mode: str = "voice",
+        conversation_mode: str = "general",
+        visibility_scope: Optional[str] = None,
+        allowed_modes: Optional[Iterable[str]] = None,
     ) -> None:
+        scope = self._resolve_memory_scope(
+            user_input=user_input,
+            conversation_mode=conversation_mode,
+            visibility_scope=visibility_scope,
+            allowed_modes=allowed_modes,
+        )
         summary = self._build_summary(user_input, agent_response)
         salience = self._compute_salience(user_input, assessment)
         memory_status = "pinned" if self._should_pin(user_input) else "active"
@@ -183,10 +283,14 @@ class LayeredMemoryService:
                         salience,
                         memory_status,
                         input_mode,
+                        conversation_mode,
+                        visibility_scope,
+                        allowed_modes,
+                        restricted_reason,
                         dialogue_signals,
                         embedding
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector)
                     RETURNING id::text
                     """,
                     (
@@ -199,6 +303,10 @@ class LayeredMemoryService:
                         salience,
                         memory_status,
                         input_mode,
+                        scope.conversation_mode,
+                        scope.visibility_scope,
+                        list(scope.allowed_modes),
+                        scope.restricted_reason,
                         json.dumps(assessment.dialogue_signals.model_dump()),
                         episode_embedding,
                     ),
@@ -211,9 +319,9 @@ class LayeredMemoryService:
         procedural_candidates = self._extract_procedural_candidates(user_input, assessment)
         graph_facts = self._extract_graph_facts(user_input, semantic_candidates)
 
-        await self._upsert_semantic_candidates(user_id, semantic_candidates, episode_id)
-        await self._upsert_procedural_candidates(user_id, procedural_candidates, episode_id)
-        await self._update_graph(user_id, graph_facts, episode_id)
+        await self._upsert_semantic_candidates(user_id, semantic_candidates, episode_id, scope)
+        await self._upsert_procedural_candidates(user_id, procedural_candidates, episode_id, scope)
+        await self._update_graph(user_id, graph_facts, episode_id, scope)
         await self._update_dialogue_profile(user_id, episode_id, assessment)
         await self.consolidate_user(user_id)
 
@@ -222,7 +330,13 @@ class LayeredMemoryService:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    SELECT user_input, emotional_tone, salience
+                    SELECT
+                        user_input,
+                        emotional_tone,
+                        salience,
+                        visibility_scope,
+                        allowed_modes,
+                        conversation_mode
                     FROM episodes
                     WHERE user_id = %s
                     ORDER BY timestamp DESC
@@ -237,6 +351,7 @@ class LayeredMemoryService:
             await self._reinforce_recent_procedurals(user_id, recent_episodes)
 
         await self._normalize_legacy_semantic_keys(user_id)
+        await self._fold_semantic_duplicate_families(user_id)
         await self._resolve_semantic_conflicts(user_id)
         await self._archive_stale_episodes(user_id)
         await self._archive_stale_semantics(user_id)
@@ -720,7 +835,8 @@ class LayeredMemoryService:
                     counts[key] = int(row["total"])
         return counts
 
-    async def atlas_snapshot(self, user_id: str) -> dict[str, object]:
+    async def atlas_snapshot(self, user_id: str, conversation_mode: str = "general") -> dict[str, object]:
+        current_mode = self._normalize_mode(conversation_mode)
         stats = await self.stats(user_id)
         dialogue_profile = await self.dialogue_profile(user_id)
 
@@ -745,6 +861,10 @@ class LayeredMemoryService:
                         last_updated
                     FROM semantic_memories
                     WHERE user_id = %s
+                      AND (
+                        visibility_scope = 'global'
+                        OR %s = ANY(allowed_modes)
+                      )
                     ORDER BY
                         CASE
                             WHEN memory_status = 'pinned' THEN 0
@@ -756,7 +876,7 @@ class LayeredMemoryService:
                         last_updated DESC
                     LIMIT 18
                     """,
-                    (user_id,),
+                    (user_id, current_mode),
                 )
                 semantic_rows = await cur.fetchall()
 
@@ -778,6 +898,10 @@ class LayeredMemoryService:
                         last_updated
                     FROM procedural_memories
                     WHERE user_id = %s
+                      AND (
+                        visibility_scope = 'global'
+                        OR %s = ANY(allowed_modes)
+                      )
                     ORDER BY
                         CASE
                             WHEN memory_status = 'pinned' THEN 0
@@ -789,7 +913,7 @@ class LayeredMemoryService:
                         last_updated DESC
                     LIMIT 10
                     """,
-                    (user_id,),
+                    (user_id, current_mode),
                 )
                 procedural_rows = await cur.fetchall()
 
@@ -807,10 +931,14 @@ class LayeredMemoryService:
                         dialogue_signals
                     FROM episodes
                     WHERE user_id = %s
+                      AND (
+                        visibility_scope = 'global'
+                        OR %s = ANY(allowed_modes)
+                      )
                     ORDER BY timestamp DESC
                     LIMIT 14
                     """,
-                    (user_id,),
+                    (user_id, current_mode),
                 )
                 episode_rows = await cur.fetchall()
 
@@ -833,10 +961,14 @@ class LayeredMemoryService:
                     JOIN graph_nodes source ON source.id = e.source_node_id
                     JOIN graph_nodes target ON target.id = e.target_node_id
                     WHERE e.user_id = %s
+                      AND (
+                        e.visibility_scope = 'global'
+                        OR %s = ANY(e.allowed_modes)
+                      )
                     ORDER BY e.weight DESC, e.last_seen DESC
                     LIMIT 12
                     """,
-                    (user_id,),
+                    (user_id, current_mode),
                 )
                 relation_rows = await cur.fetchall()
 
@@ -844,15 +976,18 @@ class LayeredMemoryService:
                     """
                     SELECT memory_status, COUNT(*) AS total
                     FROM (
-                        SELECT memory_status FROM episodes WHERE user_id = %s
+                        SELECT memory_status FROM episodes
+                        WHERE user_id = %s AND (visibility_scope = 'global' OR %s = ANY(allowed_modes))
                         UNION ALL
-                        SELECT memory_status FROM semantic_memories WHERE user_id = %s
+                        SELECT memory_status FROM semantic_memories
+                        WHERE user_id = %s AND (visibility_scope = 'global' OR %s = ANY(allowed_modes))
                         UNION ALL
-                        SELECT memory_status FROM procedural_memories WHERE user_id = %s
+                        SELECT memory_status FROM procedural_memories
+                        WHERE user_id = %s AND (visibility_scope = 'global' OR %s = ANY(allowed_modes))
                     ) AS all_memories
                     GROUP BY memory_status
                     """,
-                    (user_id, user_id, user_id),
+                    (user_id, current_mode, user_id, current_mode, user_id, current_mode),
                 )
                 status_counts_rows = await cur.fetchall()
 
@@ -909,8 +1044,14 @@ class LayeredMemoryService:
             "evidence": evidence_by_memory,
         }
 
-    async def conversation_feed(self, user_id: str, limit: int = 40) -> dict[str, object]:
+    async def conversation_feed(
+        self,
+        user_id: str,
+        limit: int = 40,
+        conversation_mode: str = "general",
+    ) -> dict[str, object]:
         safe_limit = max(1, min(limit, 200))
+        current_mode = self._normalize_mode(conversation_mode)
 
         async with self.db.connection() as conn:
             async with conn.cursor() as cur:
@@ -928,10 +1069,14 @@ class LayeredMemoryService:
                         input_mode
                     FROM episodes
                     WHERE user_id = %s
+                      AND (
+                        visibility_scope = 'global'
+                        OR %s = ANY(allowed_modes)
+                      )
                     ORDER BY timestamp DESC
                     LIMIT %s
                     """,
-                    (user_id, safe_limit),
+                    (user_id, current_mode, safe_limit),
                 )
                 rows = await cur.fetchall()
 
@@ -979,6 +1124,69 @@ class LayeredMemoryService:
             "turns": turns,
         }
 
+    async def mutation_feed(
+        self,
+        user_id: str,
+        limit: int = 80,
+        conversation_mode: str = "general",
+    ) -> dict[str, object]:
+        safe_limit = max(1, min(limit, 300))
+        current_mode = self._normalize_mode(conversation_mode)
+
+        async with self.db.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT
+                        id::text AS id,
+                        memory_layer,
+                        memory_id::text AS memory_id,
+                        action,
+                        reason,
+                        source_episode_id,
+                        from_status,
+                        to_status,
+                        conversation_mode,
+                        visibility_scope,
+                        allowed_modes,
+                        metadata,
+                        created_at
+                    FROM memory_mutations
+                    WHERE user_id = %s
+                      AND (
+                        visibility_scope = 'global'
+                        OR %s = ANY(allowed_modes)
+                      )
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (user_id, current_mode, safe_limit),
+                )
+                rows = await cur.fetchall()
+
+        return {
+            "user_id": user_id,
+            "generated_at": self._now().isoformat(),
+            "mutations": [
+                {
+                    "id": str(row["id"]),
+                    "memory_layer": str(row["memory_layer"]),
+                    "memory_id": str(row["memory_id"]) if row["memory_id"] else None,
+                    "action": str(row["action"]),
+                    "reason": str(row["reason"]) if row["reason"] else None,
+                    "source_episode_id": str(row["source_episode_id"]) if row["source_episode_id"] else None,
+                    "from_status": str(row["from_status"]) if row["from_status"] else None,
+                    "to_status": str(row["to_status"]) if row["to_status"] else None,
+                    "conversation_mode": str(row["conversation_mode"]),
+                    "visibility_scope": str(row["visibility_scope"]),
+                    "allowed_modes": [str(value) for value in list(row["allowed_modes"] or [])],
+                    "metadata": row.get("metadata") or {},
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                }
+                for row in rows
+            ],
+        }
+
     async def _retrieve_episodes(
         self,
         user_id: str,
@@ -987,6 +1195,7 @@ class LayeredMemoryService:
         limit: int,
         include_archived: bool,
         status_values: Optional[tuple[str, ...]],
+        current_mode: str = "general",
     ) -> List[RetrievedMemory]:
         sql, params = self._hybrid_memory_query(
             table="episodes",
@@ -999,6 +1208,7 @@ class LayeredMemoryService:
             limit=limit,
             include_archived=include_archived,
             status_values=status_values,
+            current_mode=current_mode,
             recency_window_days=21,
             recency_weight=0.12,
             extra_select="""
@@ -1008,7 +1218,10 @@ class LayeredMemoryService:
                 timestamp AS valid_from,
                 archived_at AS valid_to,
                 NULL::uuid AS superseded_by,
-                archive_reason
+                archive_reason,
+                conversation_mode,
+                visibility_scope,
+                allowed_modes
             """,
             extra_score="""
                 + salience * 0.14
@@ -1028,6 +1241,7 @@ class LayeredMemoryService:
         limit: int,
         include_archived: bool,
         status_values: Optional[tuple[str, ...]],
+        current_mode: str = "general",
     ) -> List[RetrievedMemory]:
         sql, params = self._hybrid_memory_query(
             table="semantic_memories",
@@ -1040,6 +1254,7 @@ class LayeredMemoryService:
             limit=limit,
             include_archived=include_archived,
             status_values=status_values,
+            current_mode=current_mode,
             recency_window_days=45,
             recency_weight=0.08,
             extra_select="""
@@ -1049,7 +1264,10 @@ class LayeredMemoryService:
                 valid_from,
                 valid_to,
                 superseded_by,
-                archive_reason
+                archive_reason,
+                conversation_mode,
+                visibility_scope,
+                allowed_modes
             """,
             extra_score="""
                 + confidence * 0.18
@@ -1069,6 +1287,7 @@ class LayeredMemoryService:
         limit: int,
         include_archived: bool,
         status_values: Optional[tuple[str, ...]],
+        current_mode: str = "general",
     ) -> List[RetrievedMemory]:
         sql, params = self._hybrid_memory_query(
             table="procedural_memories",
@@ -1081,6 +1300,7 @@ class LayeredMemoryService:
             limit=limit,
             include_archived=include_archived,
             status_values=status_values,
+            current_mode=current_mode,
             recency_window_days=60,
             recency_weight=0.07,
             extra_select="""
@@ -1090,7 +1310,10 @@ class LayeredMemoryService:
                 valid_from,
                 valid_to,
                 superseded_by,
-                archive_reason
+                archive_reason,
+                conversation_mode,
+                visibility_scope,
+                allowed_modes
             """,
             extra_score="""
                 + confidence * 0.20
@@ -1102,7 +1325,13 @@ class LayeredMemoryService:
         )
         return await self._run_retrieval_query(sql, params, kind="procedural")
 
-    async def _retrieve_graph(self, user_id: str, query: str, limit: int) -> List[RetrievedMemory]:
+    async def _retrieve_graph(
+        self,
+        user_id: str,
+        query: str,
+        limit: int,
+        current_mode: str = "general",
+    ) -> List[RetrievedMemory]:
         query_pattern = f"%{query.lower()}%"
         async with self.db.connection() as conn:
             async with conn.cursor() as cur:
@@ -1116,6 +1345,9 @@ class LayeredMemoryService:
                         e.source_episode_ids,
                         e.valid_from,
                         e.valid_to,
+                        e.conversation_mode,
+                        e.visibility_scope,
+                        e.allowed_modes,
                         (
                             e.weight
                             + LEAST(e.recall_count * 0.03, 0.1)
@@ -1140,6 +1372,10 @@ class LayeredMemoryService:
                     WHERE e.user_id = %s
                       AND e.edge_status = 'active'
                       AND (
+                        e.visibility_scope = 'global'
+                        OR %s = ANY(e.allowed_modes)
+                      )
+                      AND (
                         lower(source.label) LIKE %s
                         OR lower(target.label) LIKE %s
                         OR lower(e.relation) LIKE %s
@@ -1152,6 +1388,7 @@ class LayeredMemoryService:
                         query_pattern,
                         query_pattern,
                         user_id,
+                        current_mode,
                         query_pattern,
                         query_pattern,
                         query_pattern,
@@ -1171,6 +1408,9 @@ class LayeredMemoryService:
                 source_episode_ids=[str(value) for value in list(row.get("source_episode_ids") or [])],
                 valid_from=row["valid_from"].isoformat() if row.get("valid_from") else None,
                 valid_to=row["valid_to"].isoformat() if row.get("valid_to") else None,
+                conversation_mode=str(row.get("conversation_mode") or "general"),
+                visibility_scope=str(row.get("visibility_scope") or "global"),
+                allowed_modes=[str(value) for value in list(row.get("allowed_modes") or [])],
             )
             for row in rows
             if float(row["score"]) > 0
@@ -1195,6 +1435,9 @@ class LayeredMemoryService:
                 valid_to=row["valid_to"].isoformat() if row.get("valid_to") else None,
                 superseded_by=str(row["superseded_by"]) if row.get("superseded_by") else None,
                 archive_reason=str(row["archive_reason"]) if row.get("archive_reason") else None,
+                conversation_mode=str(row.get("conversation_mode") or "general"),
+                visibility_scope=str(row.get("visibility_scope") or "global"),
+                allowed_modes=[str(value) for value in list(row.get("allowed_modes") or [])],
             )
             for row in rows
             if float(row["score"]) > 0
@@ -1216,6 +1459,7 @@ class LayeredMemoryService:
         recency_weight: float,
         extra_select: str,
         extra_score: str,
+        current_mode: str = "general",
     ) -> tuple:
         effective_status_values = status_values or (
             ("active", "pinned", "archived") if include_archived else ("active", "pinned")
@@ -1246,10 +1490,14 @@ class LayeredMemoryService:
                 FROM {table}
                 WHERE {base_where}
                   AND memory_status = ANY(%s)
+                  AND (
+                    visibility_scope = 'global'
+                    OR %s = ANY(allowed_modes)
+                  )
                 ORDER BY score DESC
                 LIMIT %s
             """
-            params = (query_vector, query, user_id, list(effective_status_values), limit)
+            params = (query_vector, query, user_id, list(effective_status_values), current_mode, limit)
         else:
             sql = f"""
                 SELECT
@@ -1264,10 +1512,14 @@ class LayeredMemoryService:
                 FROM {table}
                 WHERE {base_where}
                   AND memory_status = ANY(%s)
+                  AND (
+                    visibility_scope = 'global'
+                    OR %s = ANY(allowed_modes)
+                  )
                 ORDER BY score DESC
                 LIMIT %s
             """
-            params = (query, user_id, list(effective_status_values), limit)
+            params = (query, user_id, list(effective_status_values), current_mode, limit)
         return sql, params
 
     async def _mark_recalled(self, memories: Iterable[RetrievedMemory]) -> None:
@@ -1330,6 +1582,7 @@ class LayeredMemoryService:
         query_vector: Optional[str],
         limit: int,
         assessment: Optional[Assessment],
+        current_mode: str = "general",
     ) -> List[RetrievedMemory]:
         if limit <= 0:
             return []
@@ -1347,6 +1600,7 @@ class LayeredMemoryService:
             limit=2,
             include_archived=True,
             status_values=("archived",),
+            current_mode=current_mode,
         )
         archived_procedural = await self._retrieve_procedural(
             user_id=user_id,
@@ -1355,6 +1609,7 @@ class LayeredMemoryService:
             limit=2,
             include_archived=True,
             status_values=("archived",),
+            current_mode=current_mode,
         )
         archived_episodic = await self._retrieve_episodes(
             user_id=user_id,
@@ -1363,6 +1618,7 @@ class LayeredMemoryService:
             limit=1,
             include_archived=True,
             status_values=("archived",),
+            current_mode=current_mode,
         )
 
         candidates: list[RetrievedMemory] = []
@@ -1445,9 +1701,12 @@ class LayeredMemoryService:
         user_id: str,
         candidates: List[SemanticCandidate],
         episode_id: str,
+        scope: MemoryScope,
     ) -> None:
         if not candidates:
             return
+
+        candidates = [self._canonicalize_semantic_candidate(candidate) for candidate in candidates]
 
         async with self.db.connection() as conn:
             async with conn.cursor() as cur:
@@ -1458,20 +1717,42 @@ class LayeredMemoryService:
                         SELECT id::text AS id, content, memory_status, source_episode_ids, fact_key
                         FROM semantic_memories
                         WHERE user_id = %s
+                          AND visibility_scope = %s
+                          AND allowed_modes = %s::text[]
                           AND (
                             content = %s
                             OR (fact_key IS NOT NULL AND fact_key = %s)
+                            OR lower(content) = lower(%s)
                           )
                         ORDER BY
-                          CASE WHEN content = %s THEN 0 ELSE 1 END,
+                          CASE
+                            WHEN fact_key IS NOT NULL AND fact_key = %s THEN 0
+                            WHEN content = %s THEN 1
+                            WHEN lower(content) = lower(%s) THEN 2
+                            ELSE 3
+                          END,
                           CASE WHEN memory_status = 'pinned' THEN 0 ELSE 1 END,
+                          reinforcement_count DESC,
                           last_updated DESC
                         LIMIT 1
                         """,
-                        (user_id, candidate.content, candidate.fact_key, candidate.content),
+                        (
+                            user_id,
+                            scope.visibility_scope,
+                            list(scope.allowed_modes),
+                            candidate.content,
+                            candidate.fact_key,
+                            candidate.content,
+                            candidate.fact_key,
+                            candidate.content,
+                            candidate.content,
+                        ),
                     )
                     existing = await cur.fetchone()
-                    if existing and str(existing["content"]) == candidate.content:
+                    if existing and (
+                        str(existing["content"]) == candidate.content
+                        or str(existing.get("fact_key") or "") == candidate.fact_key
+                    ):
                         source_ids = list(existing["source_episode_ids"] or [])
                         if episode_id not in source_ids:
                             source_ids.append(episode_id)
@@ -1482,7 +1763,13 @@ class LayeredMemoryService:
                                 confidence = LEAST(confidence + 0.05, 0.99),
                                 memory_status = CASE WHEN memory_status = 'pinned' THEN 'pinned' ELSE 'active' END,
                                 source_episode_ids = %s,
-                                fact_key = COALESCE(fact_key, %s),
+                                conversation_mode = %s,
+                                visibility_scope = %s,
+                                allowed_modes = %s,
+                                restricted_reason = %s,
+                                fact_key = %s,
+                                content = CASE WHEN memory_status = 'pinned' THEN content ELSE %s END,
+                                category = %s,
                                 archive_reason = NULL,
                                 archived_at = NULL,
                                 valid_to = NULL,
@@ -1491,7 +1778,29 @@ class LayeredMemoryService:
                                 embedding = COALESCE(%s::vector, embedding)
                             WHERE id = %s::uuid
                             """,
-                            (source_ids, candidate.fact_key, embedding, existing["id"]),
+                            (
+                                source_ids,
+                                scope.conversation_mode,
+                                scope.visibility_scope,
+                                list(scope.allowed_modes),
+                                scope.restricted_reason,
+                                candidate.fact_key,
+                                candidate.content,
+                                candidate.category,
+                                embedding,
+                                existing["id"],
+                            ),
+                        )
+                        await self._log_memory_mutation_cur(
+                            cur,
+                            user_id=user_id,
+                            memory_layer="semantic",
+                            memory_id=str(existing["id"]),
+                            action="reinforced",
+                            reason="direct_scope_match",
+                            source_episode_id=episode_id,
+                            scope=scope,
+                            metadata={"fact_key": candidate.fact_key},
                         )
                     else:
                         if existing and existing["memory_status"] == "pinned":
@@ -1506,6 +1815,10 @@ class LayeredMemoryService:
                                     confidence = GREATEST(confidence, %s),
                                     reinforcement_count = reinforcement_count + 1,
                                     source_episode_ids = %s,
+                                    conversation_mode = %s,
+                                    visibility_scope = %s,
+                                    allowed_modes = %s,
+                                    restricted_reason = %s,
                                     fact_key = COALESCE(%s, fact_key),
                                     archive_reason = NULL,
                                     archived_at = NULL,
@@ -1520,10 +1833,25 @@ class LayeredMemoryService:
                                     candidate.category,
                                     candidate.confidence,
                                     source_ids,
+                                    scope.conversation_mode,
+                                    scope.visibility_scope,
+                                    list(scope.allowed_modes),
+                                    scope.restricted_reason,
                                     candidate.fact_key,
                                     embedding,
                                     existing["id"],
                                 ),
+                            )
+                            await self._log_memory_mutation_cur(
+                                cur,
+                                user_id=user_id,
+                                memory_layer="semantic",
+                                memory_id=str(existing["id"]),
+                                action="reinforced",
+                                reason="pinned_scope_match",
+                                source_episode_id=episode_id,
+                                scope=scope,
+                                metadata={"fact_key": candidate.fact_key},
                             )
                             continue
 
@@ -1541,12 +1869,16 @@ class LayeredMemoryService:
                                 archive_reason,
                                 archived_at,
                                 source_episode_ids,
+                                conversation_mode,
+                                visibility_scope,
+                                allowed_modes,
+                                restricted_reason,
                                 valid_from,
                                 valid_to,
                                 superseded_by,
                                 embedding
                             )
-                            VALUES (%s, %s, %s, %s, %s, 1, 0, 'active', NULL, NULL, %s, NOW(), NULL, NULL, %s::vector)
+                            VALUES (%s, %s, %s, %s, %s, 1, 0, 'active', NULL, NULL, %s, %s, %s, %s, %s, NOW(), NULL, NULL, %s::vector)
                             RETURNING id::text AS id
                             """,
                             (
@@ -1556,10 +1888,25 @@ class LayeredMemoryService:
                                 candidate.fact_key,
                                 candidate.confidence,
                                 [episode_id],
+                                scope.conversation_mode,
+                                scope.visibility_scope,
+                                list(scope.allowed_modes),
+                                scope.restricted_reason,
                                 embedding,
                             ),
                         )
                         inserted = await cur.fetchone()
+                        await self._log_memory_mutation_cur(
+                            cur,
+                            user_id=user_id,
+                            memory_layer="semantic",
+                            memory_id=str(inserted["id"]),
+                            action="created",
+                            reason="candidate_promoted",
+                            source_episode_id=episode_id,
+                            scope=scope,
+                            metadata={"fact_key": candidate.fact_key, "category": candidate.category},
+                        )
                         if existing and existing["memory_status"] != "pinned":
                             await cur.execute(
                                 """
@@ -1572,7 +1919,27 @@ class LayeredMemoryService:
                                 WHERE id = %s::uuid
                                 """,
                                 (inserted["id"], existing["id"]),
-                            ),
+                            )
+                            await self._log_memory_mutation_cur(
+                                cur,
+                                user_id=user_id,
+                                memory_layer="semantic",
+                                memory_id=str(existing["id"]),
+                                action="archived",
+                                reason="superseded",
+                                source_episode_id=episode_id,
+                                scope=scope,
+                                from_status=str(existing["memory_status"]),
+                                to_status="archived",
+                                metadata={"superseded_by": str(inserted["id"]), "fact_key": candidate.fact_key},
+                            )
+                    await self._maybe_reinforce_global_semantic_from_scoped(
+                        cur,
+                        user_id=user_id,
+                        candidate=candidate,
+                        episode_id=episode_id,
+                        scope=scope,
+                    )
             await conn.commit()
 
     async def _upsert_procedural_candidates(
@@ -1580,6 +1947,7 @@ class LayeredMemoryService:
         user_id: str,
         candidates: List[ProceduralCandidate],
         episode_id: str,
+        scope: MemoryScope,
     ) -> None:
         if not candidates:
             return
@@ -1592,13 +1960,16 @@ class LayeredMemoryService:
                         """
                         SELECT id::text AS id, content, memory_status, source_episode_ids
                         FROM procedural_memories
-                        WHERE user_id = %s AND pattern_key = %s
+                        WHERE user_id = %s
+                          AND pattern_key = %s
+                          AND visibility_scope = %s
+                          AND allowed_modes = %s::text[]
                         ORDER BY
                           CASE WHEN memory_status = 'pinned' THEN 0 ELSE 1 END,
                           last_updated DESC
                         LIMIT 1
                         """,
-                        (user_id, candidate.pattern_key),
+                        (user_id, candidate.pattern_key, scope.visibility_scope, list(scope.allowed_modes)),
                     )
                     existing = await cur.fetchone()
                     if existing and str(existing["content"]) == candidate.content:
@@ -1613,6 +1984,10 @@ class LayeredMemoryService:
                                 confidence = LEAST(confidence + 0.04, 0.98),
                                 memory_status = CASE WHEN memory_status = 'pinned' THEN 'pinned' ELSE 'active' END,
                                 source_episode_ids = %s,
+                                conversation_mode = %s,
+                                visibility_scope = %s,
+                                allowed_modes = %s,
+                                restricted_reason = %s,
                                 archive_reason = NULL,
                                 archived_at = NULL,
                                 valid_to = NULL,
@@ -1621,7 +1996,27 @@ class LayeredMemoryService:
                                 embedding = COALESCE(%s::vector, embedding)
                             WHERE id = %s::uuid
                             """,
-                            (candidate.content, source_ids, embedding, existing["id"]),
+                            (
+                                candidate.content,
+                                source_ids,
+                                scope.conversation_mode,
+                                scope.visibility_scope,
+                                list(scope.allowed_modes),
+                                scope.restricted_reason,
+                                embedding,
+                                existing["id"],
+                            ),
+                        )
+                        await self._log_memory_mutation_cur(
+                            cur,
+                            user_id=user_id,
+                            memory_layer="procedural",
+                            memory_id=str(existing["id"]),
+                            action="reinforced",
+                            reason="direct_scope_match",
+                            source_episode_id=episode_id,
+                            scope=scope,
+                            metadata={"pattern_key": candidate.pattern_key},
                         )
                     else:
                         if existing and existing["memory_status"] == "pinned":
@@ -1635,6 +2030,10 @@ class LayeredMemoryService:
                                     confidence = GREATEST(confidence, %s),
                                     reinforcement_count = reinforcement_count + 1,
                                     source_episode_ids = %s,
+                                    conversation_mode = %s,
+                                    visibility_scope = %s,
+                                    allowed_modes = %s,
+                                    restricted_reason = %s,
                                     archive_reason = NULL,
                                     archived_at = NULL,
                                     valid_to = NULL,
@@ -1643,7 +2042,28 @@ class LayeredMemoryService:
                                     embedding = COALESCE(%s::vector, embedding)
                                 WHERE id = %s::uuid
                                 """,
-                                (candidate.content, candidate.confidence, source_ids, embedding, existing["id"]),
+                                (
+                                    candidate.content,
+                                    candidate.confidence,
+                                    source_ids,
+                                    scope.conversation_mode,
+                                    scope.visibility_scope,
+                                    list(scope.allowed_modes),
+                                    scope.restricted_reason,
+                                    embedding,
+                                    existing["id"],
+                                ),
+                            )
+                            await self._log_memory_mutation_cur(
+                                cur,
+                                user_id=user_id,
+                                memory_layer="procedural",
+                                memory_id=str(existing["id"]),
+                                action="reinforced",
+                                reason="pinned_scope_match",
+                                source_episode_id=episode_id,
+                                scope=scope,
+                                metadata={"pattern_key": candidate.pattern_key},
                             )
                             continue
 
@@ -1660,12 +2080,16 @@ class LayeredMemoryService:
                                 archive_reason,
                                 archived_at,
                                 source_episode_ids,
+                                conversation_mode,
+                                visibility_scope,
+                                allowed_modes,
+                                restricted_reason,
                                 valid_from,
                                 valid_to,
                                 superseded_by,
                                 embedding
                             )
-                            VALUES (%s, %s, %s, %s, 1, 0, 'active', NULL, NULL, %s, NOW(), NULL, NULL, %s::vector)
+                            VALUES (%s, %s, %s, %s, 1, 0, 'active', NULL, NULL, %s, %s, %s, %s, %s, NOW(), NULL, NULL, %s::vector)
                             RETURNING id::text AS id
                             """,
                             (
@@ -1674,10 +2098,25 @@ class LayeredMemoryService:
                                 candidate.pattern_key,
                                 candidate.confidence,
                                 [episode_id],
+                                scope.conversation_mode,
+                                scope.visibility_scope,
+                                list(scope.allowed_modes),
+                                scope.restricted_reason,
                                 embedding,
                             ),
                         )
                         inserted = await cur.fetchone()
+                        await self._log_memory_mutation_cur(
+                            cur,
+                            user_id=user_id,
+                            memory_layer="procedural",
+                            memory_id=str(inserted["id"]),
+                            action="created",
+                            reason="candidate_promoted",
+                            source_episode_id=episode_id,
+                            scope=scope,
+                            metadata={"pattern_key": candidate.pattern_key},
+                        )
                         if existing and existing["memory_status"] != "pinned":
                             await cur.execute(
                                 """
@@ -1691,17 +2130,210 @@ class LayeredMemoryService:
                                 """,
                                 (inserted["id"], existing["id"]),
                             )
+                            await self._log_memory_mutation_cur(
+                                cur,
+                                user_id=user_id,
+                                memory_layer="procedural",
+                                memory_id=str(existing["id"]),
+                                action="archived",
+                                reason="superseded",
+                                source_episode_id=episode_id,
+                                scope=scope,
+                                from_status=str(existing["memory_status"]),
+                                to_status="archived",
+                                metadata={"superseded_by": str(inserted["id"]), "pattern_key": candidate.pattern_key},
+                            )
+                    await self._maybe_reinforce_global_procedural_from_scoped(
+                        cur,
+                        user_id=user_id,
+                        candidate=candidate,
+                        episode_id=episode_id,
+                        scope=scope,
+                    )
             await conn.commit()
 
-    async def _update_graph(self, user_id: str, facts: List[GraphFact], episode_id: str) -> None:
+    async def _maybe_reinforce_global_semantic_from_scoped(
+        self,
+        cur,
+        *,
+        user_id: str,
+        candidate: SemanticCandidate,
+        episode_id: Optional[str],
+        scope: MemoryScope,
+    ) -> None:
+        """Private evidence may confirm an already-global belief, but never creates one."""
+        if scope.visibility_scope == "global":
+            return
+
+        await cur.execute(
+            """
+            UPDATE semantic_memories
+            SET reinforcement_count = reinforcement_count + 1,
+                private_reinforcement_count = private_reinforcement_count + 1,
+                confidence = LEAST(confidence + 0.015, 0.99),
+                last_updated = NOW()
+            WHERE user_id = %s
+              AND visibility_scope = 'global'
+              AND allowed_modes = '{}'::text[]
+              AND memory_status IN ('active', 'pinned')
+              AND (
+                fact_key = %s
+                OR lower(content) = lower(%s)
+              )
+            RETURNING id::text AS id
+            """,
+            (user_id, candidate.fact_key, candidate.content),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return
+
+        await self._log_memory_mutation_cur(
+            cur,
+            user_id=user_id,
+            memory_layer="semantic",
+            memory_id=str(row["id"]),
+            action="reinforced",
+            reason="scoped_confirmation_of_existing_global",
+            source_episode_id=episode_id,
+            scope=scope,
+            metadata={
+                "fact_key": candidate.fact_key,
+                "source_visibility_scope": scope.visibility_scope,
+                "source_allowed_modes": list(scope.allowed_modes),
+                "private_source_not_added_to_global_provenance": True,
+            },
+        )
+
+    async def _maybe_reinforce_global_procedural_from_scoped(
+        self,
+        cur,
+        *,
+        user_id: str,
+        candidate: ProceduralCandidate,
+        episode_id: Optional[str],
+        scope: MemoryScope,
+    ) -> None:
+        """Private evidence can confirm an existing global procedure without leaking details."""
+        if scope.visibility_scope == "global":
+            return
+
+        await cur.execute(
+            """
+            UPDATE procedural_memories
+            SET reinforcement_count = reinforcement_count + 1,
+                private_reinforcement_count = private_reinforcement_count + 1,
+                confidence = LEAST(confidence + 0.012, 0.98),
+                last_updated = NOW()
+            WHERE user_id = %s
+              AND visibility_scope = 'global'
+              AND allowed_modes = '{}'::text[]
+              AND memory_status IN ('active', 'pinned')
+              AND (
+                pattern_key = %s
+                OR lower(content) = lower(%s)
+              )
+            RETURNING id::text AS id
+            """,
+            (user_id, candidate.pattern_key, candidate.content),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return
+
+        await self._log_memory_mutation_cur(
+            cur,
+            user_id=user_id,
+            memory_layer="procedural",
+            memory_id=str(row["id"]),
+            action="reinforced",
+            reason="scoped_confirmation_of_existing_global",
+            source_episode_id=episode_id,
+            scope=scope,
+            metadata={
+                "pattern_key": candidate.pattern_key,
+                "source_visibility_scope": scope.visibility_scope,
+                "source_allowed_modes": list(scope.allowed_modes),
+                "private_source_not_added_to_global_provenance": True,
+            },
+        )
+
+    async def _log_memory_mutation_cur(
+        self,
+        cur,
+        *,
+        user_id: str,
+        memory_layer: str,
+        memory_id: Optional[str],
+        action: str,
+        scope: MemoryScope,
+        reason: Optional[str] = None,
+        source_episode_id: Optional[str] = None,
+        from_status: Optional[str] = None,
+        to_status: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        await cur.execute(
+            """
+            INSERT INTO memory_mutations (
+                user_id,
+                memory_layer,
+                memory_id,
+                action,
+                reason,
+                source_episode_id,
+                from_status,
+                to_status,
+                conversation_mode,
+                visibility_scope,
+                allowed_modes,
+                metadata
+            )
+            VALUES (%s, %s, %s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                user_id,
+                memory_layer,
+                memory_id,
+                action,
+                reason,
+                source_episode_id,
+                from_status,
+                to_status,
+                scope.conversation_mode,
+                scope.visibility_scope,
+                list(scope.allowed_modes),
+                json.dumps(metadata or {}),
+            ),
+        )
+
+    async def _update_graph(
+        self,
+        user_id: str,
+        facts: List[GraphFact],
+        episode_id: str,
+        scope: MemoryScope,
+    ) -> None:
         if not facts:
             return
 
         async with self.db.connection() as conn:
             async with conn.cursor() as cur:
                 for fact in facts:
-                    source_id = await self._upsert_graph_node(cur, user_id, fact.source_label, fact.source_type)
-                    target_id = await self._upsert_graph_node(cur, user_id, fact.target_label, fact.target_type)
+                    source_id = await self._upsert_graph_node(
+                        cur,
+                        user_id,
+                        fact.source_label,
+                        fact.source_type,
+                        scope,
+                    )
+                    target_id = await self._upsert_graph_node(
+                        cur,
+                        user_id,
+                        fact.target_label,
+                        fact.target_type,
+                        scope,
+                    )
                     await cur.execute(
                         """
                         SELECT id::text AS id, source_episode_ids
@@ -1710,8 +2342,17 @@ class LayeredMemoryService:
                           AND source_node_id = %s::uuid
                           AND target_node_id = %s::uuid
                           AND relation = %s
+                          AND visibility_scope = %s
+                          AND allowed_modes = %s::text[]
                         """,
-                        (user_id, source_id, target_id, fact.relation),
+                        (
+                            user_id,
+                            source_id,
+                            target_id,
+                            fact.relation,
+                            scope.visibility_scope,
+                            list(scope.allowed_modes),
+                        ),
                     )
                     existing = await cur.fetchone()
                     if existing:
@@ -1723,12 +2364,23 @@ class LayeredMemoryService:
                             UPDATE graph_edges
                             SET weight = LEAST(weight + 0.08, 1.0),
                                 source_episode_ids = %s,
+                                conversation_mode = %s,
+                                visibility_scope = %s,
+                                allowed_modes = %s,
+                                restricted_reason = %s,
                                 edge_status = 'active',
                                 valid_to = NULL,
                                 last_seen = NOW()
                             WHERE id = %s::uuid
                             """,
-                            (source_ids, existing["id"]),
+                            (
+                                source_ids,
+                                scope.conversation_mode,
+                                scope.visibility_scope,
+                                list(scope.allowed_modes),
+                                scope.restricted_reason,
+                                existing["id"],
+                            ),
                         )
                     else:
                         await cur.execute(
@@ -1741,91 +2393,185 @@ class LayeredMemoryService:
                                 weight,
                                 recall_count,
                                 source_episode_ids,
+                                conversation_mode,
+                                visibility_scope,
+                                allowed_modes,
+                                restricted_reason,
                                 edge_status,
                                 valid_from,
                                 valid_to,
                                 created_at,
                                 last_seen
                             )
-                            VALUES (%s, %s::uuid, %s::uuid, %s, %s, 0, %s, 'active', NOW(), NULL, NOW(), NOW())
+                            VALUES (%s, %s::uuid, %s::uuid, %s, %s, 0, %s, %s, %s, %s, %s, 'active', NOW(), NULL, NOW(), NOW())
                             """,
-                            (user_id, source_id, target_id, fact.relation, fact.weight, [episode_id]),
+                            (
+                                user_id,
+                                source_id,
+                                target_id,
+                                fact.relation,
+                                fact.weight,
+                                [episode_id],
+                                scope.conversation_mode,
+                                scope.visibility_scope,
+                                list(scope.allowed_modes),
+                                scope.restricted_reason,
+                            ),
                         )
             await conn.commit()
 
-    async def _upsert_graph_node(self, cur, user_id: str, label: str, node_type: str) -> str:
+    async def _upsert_graph_node(
+        self,
+        cur,
+        user_id: str,
+        label: str,
+        node_type: str,
+        scope: MemoryScope,
+    ) -> str:
         await cur.execute(
             """
-            INSERT INTO graph_nodes (user_id, label, node_type, properties)
-            VALUES (%s, %s, %s, '{}'::jsonb)
+            INSERT INTO graph_nodes (
+                user_id,
+                label,
+                node_type,
+                properties,
+                visibility_scope,
+                allowed_modes,
+                restricted_reason
+            )
+            VALUES (%s, %s, %s, '{}'::jsonb, %s, %s, %s)
             ON CONFLICT (user_id, label)
             DO UPDATE SET
                 label = EXCLUDED.label,
                 node_type = CASE
                     WHEN graph_nodes.node_type = 'concept' AND EXCLUDED.node_type <> 'concept' THEN EXCLUDED.node_type
                     ELSE graph_nodes.node_type
-                END
+                END,
+                visibility_scope = CASE
+                    WHEN graph_nodes.visibility_scope = 'global' THEN 'global'
+                    ELSE EXCLUDED.visibility_scope
+                END,
+                allowed_modes = CASE
+                    WHEN graph_nodes.visibility_scope = 'global' THEN graph_nodes.allowed_modes
+                    ELSE EXCLUDED.allowed_modes
+                END,
+                restricted_reason = COALESCE(graph_nodes.restricted_reason, EXCLUDED.restricted_reason)
             RETURNING id::text
             """,
-            (user_id, label, node_type),
+            (
+                user_id,
+                label,
+                node_type,
+                scope.visibility_scope,
+                list(scope.allowed_modes),
+                scope.restricted_reason,
+            ),
         )
         row = await cur.fetchone()
         return str(row["id"])
 
     async def _reinforce_recent_semantics(self, user_id: str, recent_episodes: List[dict]) -> None:
         seen: dict = {}
+        candidates_by_key: dict = {}
         for episode in recent_episodes:
+            scope_key = (
+                str(episode.get("visibility_scope") or "global"),
+                tuple(str(mode) for mode in list(episode.get("allowed_modes") or [])),
+                str(episode.get("conversation_mode") or "general"),
+            )
             for candidate in self._extract_semantic_candidates(
                 str(episode["user_input"]),
                 Assessment(stakes="low", novelty="low", emotional_tone=str(episode["emotional_tone"])),
             ):
-                seen[candidate.fact_key] = seen.get(candidate.fact_key, 0) + 1
+                key = (*scope_key, candidate.fact_key)
+                seen[key] = seen.get(key, 0) + 1
+                candidates_by_key[key] = candidate
 
-        repeated_keys = [fact_key for fact_key, count in seen.items() if count > 1]
-        if not repeated_keys:
+        repeated = [(key, count) for key, count in seen.items() if count > 1]
+        if not repeated:
             return
 
         async with self.db.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    UPDATE semantic_memories
-                    SET confidence = LEAST(confidence + 0.03, 0.99),
-                        reinforcement_count = reinforcement_count + 1,
-                        last_updated = NOW()
-                    WHERE user_id = %s
-                      AND fact_key = ANY(%s)
-                      AND memory_status IN ('active', 'pinned')
-                    """,
-                    (user_id, repeated_keys),
-                )
+                for key, _count in repeated:
+                    visibility_scope, allowed_modes, conversation_mode, fact_key = key
+                    await cur.execute(
+                        """
+                        UPDATE semantic_memories
+                        SET confidence = LEAST(confidence + 0.03, 0.99),
+                            reinforcement_count = reinforcement_count + 1,
+                            last_updated = NOW()
+                        WHERE user_id = %s
+                          AND fact_key = %s
+                          AND visibility_scope = %s
+                          AND allowed_modes = %s::text[]
+                          AND memory_status IN ('active', 'pinned')
+                        """,
+                        (user_id, fact_key, visibility_scope, list(allowed_modes)),
+                    )
+                    await self._maybe_reinforce_global_semantic_from_scoped(
+                        cur,
+                        user_id=user_id,
+                        candidate=candidates_by_key[key],
+                        episode_id=None,
+                        scope=MemoryScope(
+                            conversation_mode=conversation_mode,
+                            visibility_scope=visibility_scope,
+                            allowed_modes=tuple(allowed_modes),
+                            restricted_reason="nightly_scoped_consolidation",
+                        ),
+                    )
             await conn.commit()
 
     async def _reinforce_recent_procedurals(self, user_id: str, recent_episodes: List[dict]) -> None:
         seen: dict = {}
+        candidates_by_key: dict = {}
         for episode in recent_episodes:
+            scope_key = (
+                str(episode.get("visibility_scope") or "global"),
+                tuple(str(mode) for mode in list(episode.get("allowed_modes") or [])),
+                str(episode.get("conversation_mode") or "general"),
+            )
             assessment = Assessment(stakes="low", novelty="low", emotional_tone=str(episode["emotional_tone"]))
             for candidate in self._extract_procedural_candidates(str(episode["user_input"]), assessment):
-                seen[candidate.pattern_key] = seen.get(candidate.pattern_key, 0) + 1
+                key = (*scope_key, candidate.pattern_key)
+                seen[key] = seen.get(key, 0) + 1
+                candidates_by_key[key] = candidate
 
-        repeated_keys = [pattern_key for pattern_key, count in seen.items() if count > 1]
-        if not repeated_keys:
+        repeated = [(key, count) for key, count in seen.items() if count > 1]
+        if not repeated:
             return
 
         async with self.db.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    UPDATE procedural_memories
-                    SET confidence = LEAST(confidence + 0.025, 0.98),
-                        reinforcement_count = reinforcement_count + 1,
-                        last_updated = NOW()
-                    WHERE user_id = %s
-                      AND pattern_key = ANY(%s)
-                      AND memory_status IN ('active', 'pinned')
-                    """,
-                    (user_id, repeated_keys),
-                )
+                for key, _count in repeated:
+                    visibility_scope, allowed_modes, conversation_mode, pattern_key = key
+                    await cur.execute(
+                        """
+                        UPDATE procedural_memories
+                        SET confidence = LEAST(confidence + 0.025, 0.98),
+                            reinforcement_count = reinforcement_count + 1,
+                            last_updated = NOW()
+                        WHERE user_id = %s
+                          AND pattern_key = %s
+                          AND visibility_scope = %s
+                          AND allowed_modes = %s::text[]
+                          AND memory_status IN ('active', 'pinned')
+                        """,
+                        (user_id, pattern_key, visibility_scope, list(allowed_modes)),
+                    )
+                    await self._maybe_reinforce_global_procedural_from_scoped(
+                        cur,
+                        user_id=user_id,
+                        candidate=candidates_by_key[key],
+                        episode_id=None,
+                        scope=MemoryScope(
+                            conversation_mode=conversation_mode,
+                            visibility_scope=visibility_scope,
+                            allowed_modes=tuple(allowed_modes),
+                            restricted_reason="nightly_scoped_consolidation",
+                        ),
+                    )
             await conn.commit()
 
     async def _resolve_semantic_conflicts(self, user_id: str) -> None:
@@ -1839,7 +2585,7 @@ class LayeredMemoryService:
                             fact_key,
                             memory_status,
                             FIRST_VALUE(id) OVER (
-                                PARTITION BY fact_key
+                                PARTITION BY fact_key, visibility_scope, allowed_modes
                                 ORDER BY
                                     CASE WHEN memory_status = 'pinned' THEN 0 ELSE 1 END,
                                     reinforcement_count DESC,
@@ -1847,7 +2593,7 @@ class LayeredMemoryService:
                                     last_updated DESC
                             ) AS winner_id,
                             ROW_NUMBER() OVER (
-                                PARTITION BY fact_key
+                                PARTITION BY fact_key, visibility_scope, allowed_modes
                                 ORDER BY
                                     CASE WHEN memory_status = 'pinned' THEN 0 ELSE 1 END,
                                     reinforcement_count DESC,
@@ -1898,6 +2644,34 @@ class LayeredMemoryService:
                         (fact_key, user_id, content_pattern),
                     )
 
+                for fact_key, family in SEMANTIC_CANONICAL_FAMILIES.items():
+                    for keyword in family["keywords"]:
+                        await cur.execute(
+                            """
+                            UPDATE semantic_memories
+                            SET fact_key = %s,
+                                content = CASE
+                                    WHEN memory_status = 'pinned' THEN content
+                                    ELSE %s
+                                END,
+                                category = %s,
+                                last_updated = NOW()
+                            WHERE user_id = %s
+                              AND (
+                                fact_key = %s
+                                OR lower(content) LIKE %s
+                              )
+                            """,
+                            (
+                                fact_key,
+                                family["content"],
+                                family["category"],
+                                user_id,
+                                fact_key,
+                                f"%{keyword}%",
+                            ),
+                        )
+
                 await cur.execute(
                     """
                     UPDATE semantic_memories
@@ -1943,10 +2717,120 @@ class LayeredMemoryService:
                             'preference:stress_response_style'
                           )
                           AND precise.id <> sm.id
+                          AND precise.visibility_scope = sm.visibility_scope
+                          AND precise.allowed_modes = sm.allowed_modes
                       )
                     """,
                     (user_id,),
                 )
+            await conn.commit()
+
+    async def _fold_semantic_duplicate_families(self, user_id: str) -> None:
+        async with self.db.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT
+                        id::text AS id,
+                        content,
+                        category,
+                        fact_key,
+                        confidence,
+                        reinforcement_count,
+                        recall_count,
+                        memory_status,
+                        source_episode_ids,
+                        visibility_scope,
+                        allowed_modes,
+                        last_updated
+                    FROM semantic_memories
+                    WHERE user_id = %s
+                      AND fact_key IS NOT NULL
+                      AND memory_status IN ('active', 'pinned')
+                    ORDER BY
+                        fact_key,
+                        CASE WHEN memory_status = 'pinned' THEN 0 ELSE 1 END,
+                        reinforcement_count DESC,
+                        recall_count DESC,
+                        last_updated DESC
+                    """,
+                    (user_id,),
+                )
+                rows = await cur.fetchall()
+
+                rows_by_key: dict[tuple[str, str, tuple[str, ...]], list[dict]] = {}
+                for row in rows:
+                    scope_key = (
+                        str(row["fact_key"]),
+                        str(row.get("visibility_scope") or "global"),
+                        tuple(str(mode) for mode in list(row.get("allowed_modes") or [])),
+                    )
+                    rows_by_key.setdefault(scope_key, []).append(row)
+
+                for (fact_key, _visibility_scope, _allowed_modes), family_rows in rows_by_key.items():
+                    if len(family_rows) < 2:
+                        continue
+
+                    winner = family_rows[0]
+                    duplicates = family_rows[1:]
+                    source_ids = {
+                        str(source_id)
+                        for row in family_rows
+                        for source_id in list(row["source_episode_ids"] or [])
+                    }
+                    reinforcement_total = sum(int(row["reinforcement_count"]) for row in family_rows)
+                    recall_total = sum(int(row["recall_count"]) for row in family_rows)
+                    confidence = max(float(row["confidence"]) for row in family_rows)
+                    duplicate_ids = [str(row["id"]) for row in duplicates if row["memory_status"] != "pinned"]
+
+                    family = SEMANTIC_CANONICAL_FAMILIES.get(fact_key)
+                    canonical_content = str(family["content"]) if family else str(winner["content"])
+                    canonical_category = str(family["category"]) if family else str(winner["category"])
+
+                    await cur.execute(
+                        """
+                        UPDATE semantic_memories
+                        SET content = CASE
+                                WHEN memory_status = 'pinned' THEN content
+                                ELSE %s
+                            END,
+                            category = %s,
+                            confidence = GREATEST(confidence, %s),
+                            reinforcement_count = GREATEST(reinforcement_count, %s),
+                            recall_count = GREATEST(recall_count, %s),
+                            source_episode_ids = %s,
+                            archive_reason = NULL,
+                            archived_at = NULL,
+                            valid_to = NULL,
+                            superseded_by = NULL,
+                            last_updated = NOW()
+                        WHERE id = %s::uuid
+                        """,
+                        (
+                            canonical_content,
+                            canonical_category,
+                            confidence,
+                            reinforcement_total,
+                            recall_total,
+                            sorted(source_ids),
+                            winner["id"],
+                        ),
+                    )
+
+                    if duplicate_ids:
+                        await cur.execute(
+                            """
+                            UPDATE semantic_memories
+                            SET memory_status = 'archived',
+                                archive_reason = 'reinforced_into_canonical',
+                                archived_at = NOW(),
+                                valid_to = NOW(),
+                                superseded_by = %s::uuid,
+                                last_updated = NOW()
+                            WHERE id = ANY(%s::uuid[])
+                            """,
+                            (winner["id"], duplicate_ids),
+                        )
             await conn.commit()
 
     async def _archive_stale_episodes(self, user_id: str) -> None:
@@ -2128,6 +3012,252 @@ class LayeredMemoryService:
             plan.procedural_weight *= 1.34
         return plan
 
+    def _classify_retrieval_intent(self, query: str, assessment: Optional[Assessment]) -> RetrievalIntent:
+        lowered = query.lower()
+
+        if any(
+            marker in lowered
+            for marker in [
+                "remember",
+                "what did i tell you",
+                "what did we talk about",
+                "earlier",
+                "last week",
+                "last month",
+                "before",
+                "back when",
+            ]
+        ):
+            return RetrievalIntent(
+                name="episodic_recall",
+                mention_kinds=("episodic", "semantic", "graph"),
+                silent_kinds=("procedural",),
+                mention_limit=5,
+                silent_limit=2,
+            )
+
+        if any(
+            marker in lowered
+            for marker in ["what changed", "changed recently", "different now", "used to", "now i"]
+        ):
+            return RetrievalIntent(
+                name="temporal_change",
+                mention_kinds=("semantic", "episodic", "graph"),
+                silent_kinds=("procedural",),
+                mention_limit=5,
+                silent_limit=2,
+            )
+
+        if any(
+            marker in lowered
+            for marker in [
+                "prefer",
+                "communication",
+                "respond",
+                "how should you",
+                "what works for me",
+                "how do i usually",
+                "when i'm stressed",
+                "when i am stressed",
+            ]
+        ):
+            return RetrievalIntent(
+                name="self_model",
+                mention_kinds=("semantic", "procedural"),
+                silent_kinds=("episodic", "graph"),
+                mention_limit=4,
+                silent_limit=3,
+            )
+
+        if any(
+            marker in lowered
+            for marker in ["person", "people", "relationship", "connected", "project", "goal", "investor", "client"]
+        ):
+            return RetrievalIntent(
+                name="relationship_or_project",
+                mention_kinds=("graph", "semantic", "episodic"),
+                silent_kinds=("procedural",),
+                mention_limit=4,
+                silent_limit=3,
+            )
+
+        if assessment and assessment.emotional_tone in {"stressed", "grief", "frustrated", "sad"}:
+            return RetrievalIntent(
+                name="emotional_support",
+                mention_kinds=("procedural", "semantic", "episodic"),
+                silent_kinds=("procedural", "semantic"),
+                mention_limit=3,
+                silent_limit=4,
+            )
+
+        return RetrievalIntent(
+            name="general",
+            mention_kinds=("semantic", "episodic", "graph"),
+            silent_kinds=("procedural", "semantic"),
+            mention_limit=3,
+            silent_limit=3,
+        )
+
+    def _select_memories_for_prompt(
+        self,
+        memories: List[RetrievedMemory],
+        query: str,
+        assessment: Optional[Assessment],
+        limit: int,
+    ) -> List[RetrievedMemory]:
+        if not memories:
+            return []
+
+        intent = self._classify_retrieval_intent(query, assessment)
+        query_terms = self._meaningful_terms(query)
+        mention_candidates: list[tuple[float, RetrievedMemory]] = []
+        silent_candidates: list[tuple[float, RetrievedMemory]] = []
+
+        for memory in memories:
+            use, reason, adjusted_score = self._judge_memory_use(memory, intent, query_terms, assessment)
+            if use == "drop":
+                continue
+
+            judged = memory.model_copy(
+                update={
+                    "score": adjusted_score,
+                    "use": use,
+                    "relevance_reason": f"{intent.name}: {reason}",
+                }
+            )
+            if use == "mention":
+                mention_candidates.append((adjusted_score, judged))
+            else:
+                silent_candidates.append((adjusted_score, judged))
+
+        mention_candidates.sort(key=lambda item: item[0], reverse=True)
+        silent_candidates.sort(key=lambda item: item[0], reverse=True)
+
+        mention_limit = min(intent.mention_limit, max(2, limit))
+        silent_limit = min(intent.silent_limit, max(1, limit - min(len(mention_candidates), mention_limit)))
+
+        selected = [
+            memory
+            for _score, memory in mention_candidates[:mention_limit]
+        ]
+        selected.extend(
+            memory
+            for _score, memory in silent_candidates[:silent_limit]
+            if memory.content not in {selected_memory.content for selected_memory in selected}
+        )
+
+        if not selected and memories:
+            best = memories[0]
+            selected.append(
+                best.model_copy(
+                    update={
+                        "use": "mention",
+                        "relevance_reason": f"{intent.name}: strongest available memory",
+                    }
+                )
+            )
+
+        return selected[: max(limit, 1)]
+
+    def _judge_memory_use(
+        self,
+        memory: RetrievedMemory,
+        intent: RetrievalIntent,
+        query_terms: set[str],
+        assessment: Optional[Assessment],
+    ) -> tuple[str, str, float]:
+        lowered_content = memory.content.lower()
+        overlap = len(query_terms.intersection(self._meaningful_terms(memory.content)))
+        confidence = memory.confidence if memory.confidence is not None else 0.65
+        score = memory.score
+
+        if memory.memory_status == "pinned":
+            score += 0.10
+        if memory.memory_status == "archived":
+            score -= 0.08
+
+        if overlap:
+            score += min(overlap * 0.045, 0.18)
+        elif intent.name not in {"emotional_support", "general"}:
+            score -= 0.06
+
+        if memory.kind in intent.mention_kinds:
+            score += 0.08
+        if memory.kind in intent.silent_kinds:
+            score += 0.04
+
+        generic_preference = any(
+            marker in lowered_content
+            for marker in ["direct", "concise", "grounding", "calm", "respond", "communication"]
+        )
+        project_context = any(
+            marker in lowered_content
+            for marker in ["building", "working on", "goal", "project", "ai companion"]
+        )
+        emotional_context = any(
+            marker in lowered_content
+            for marker in ["stress", "stressed", "heavy", "overwhelmed", "grounding", "sad", "grief"]
+        )
+
+        if intent.name == "emotional_support":
+            if emotional_context or memory.kind == "procedural":
+                return "silent", "regulates tone or support strategy", score + 0.10
+            if memory.kind == "episodic" and overlap:
+                return "mention", "related past episode may ground the response", score
+
+        if intent.name == "self_model":
+            if memory.kind in {"semantic", "procedural"}:
+                return "mention", "directly answers a self-model question", score + 0.06
+            if generic_preference:
+                return "silent", "use as response-style guidance", score
+
+        if intent.name == "episodic_recall":
+            if memory.kind == "episodic":
+                return "mention", "the user is asking for remembered events", score + 0.10
+            if overlap or memory.memory_status == "pinned":
+                return "mention", "supports the recalled episode", score
+
+        if intent.name == "temporal_change":
+            if memory.valid_to or memory.memory_status == "archived":
+                return "mention", "older state may help explain change", score + 0.08
+            if memory.kind in {"semantic", "episodic"}:
+                return "mention", "current or past belief may contrast over time", score
+
+        if intent.name == "relationship_or_project":
+            if memory.kind in {"graph", "episodic"} and (overlap or project_context):
+                return "mention", "connected to the active person/project thread", score + 0.08
+            if memory.kind == "semantic" and project_context:
+                return "mention", "project/goal context is relevant", score + 0.05
+            if memory.kind == "procedural":
+                return "silent", "may shape practical next steps", score
+
+        if memory.kind == "procedural":
+            if generic_preference or emotional_context:
+                return "silent", "procedural guidance should influence style, not be quoted", score
+            if score >= 0.74:
+                return "silent", "high-scoring procedure may guide response", score
+
+        if memory.kind == "semantic" and generic_preference and intent.name == "general":
+            return "silent", "general preference should shape tone quietly", score
+
+        if overlap >= 2:
+            return "mention", "specific term overlap with the current turn", score + 0.04
+        if memory.memory_status == "pinned" and score >= 0.42:
+            return "silent", "pinned but not directly worth mentioning", score
+        if confidence >= 0.86 and score >= 0.62:
+            return "silent", "reliable background context", score
+        if score >= 0.70:
+            return "mention", "high retrieval score", score
+
+        return "drop", "too broad or weak for this turn", score
+
+    def _meaningful_terms(self, text: str) -> set[str]:
+        return {
+            word
+            for word in re.findall(r"\b[a-z][a-z0-9'-]{2,}\b", text.lower())
+            if word not in STOPWORDS
+        }
+
     def _rebalance_scores(
         self,
         memories: List[RetrievedMemory],
@@ -2202,6 +3332,33 @@ class LayeredMemoryService:
                 bonus += 0.08
 
         return bonus
+
+    def _canonicalize_semantic_candidate(self, candidate: SemanticCandidate) -> SemanticCandidate:
+        normalized_content = self._normalize_semantic_text(candidate.content)
+
+        if candidate.fact_key in SEMANTIC_CANONICAL_FAMILIES:
+            family = SEMANTIC_CANONICAL_FAMILIES[candidate.fact_key]
+            return SemanticCandidate(
+                category=str(family["category"]),
+                fact_key=candidate.fact_key,
+                content=str(family["content"]),
+                confidence=candidate.confidence,
+            )
+
+        for fact_key, family in SEMANTIC_CANONICAL_FAMILIES.items():
+            if any(keyword in normalized_content for keyword in family["keywords"]):
+                return SemanticCandidate(
+                    category=str(family["category"]),
+                    fact_key=fact_key,
+                    content=str(family["content"]),
+                    confidence=max(candidate.confidence, 0.78),
+                )
+
+        return candidate
+
+    def _normalize_semantic_text(self, text: str) -> str:
+        cleaned = re.sub(r"[^a-z0-9+ ]+", " ", text.lower())
+        return re.sub(r"\s+", " ", cleaned).strip()
 
     def _extract_semantic_candidates(
         self,
@@ -2498,6 +3655,7 @@ class LayeredMemoryService:
     def _dedupe_semantic_candidates(self, candidates: List[SemanticCandidate]) -> List[SemanticCandidate]:
         seen = {}
         for candidate in candidates:
+            candidate = self._canonicalize_semantic_candidate(candidate)
             seen[candidate.fact_key] = candidate
         return list(seen.values())
 
@@ -2590,6 +3748,8 @@ class LayeredMemoryService:
         ]
 
         for row in semantic_rows:
+            if str(row["memory_status"]) not in {"active", "pinned"}:
+                continue
             nodes.append(
                 {
                     "id": f"semantic:{row['id']}",
@@ -2620,6 +3780,8 @@ class LayeredMemoryService:
             )
 
         for row in procedural_rows:
+            if str(row["memory_status"]) not in {"active", "pinned"}:
+                continue
             nodes.append(
                 {
                     "id": f"procedural:{row['id']}",
@@ -2737,6 +3899,92 @@ class LayeredMemoryService:
     def _build_summary(self, user_input: str, agent_response: str) -> str:
         combined = f"User said: {self._clean_sentence(user_input)} Agent replied: {self._clean_sentence(agent_response)}"
         return combined[:500]
+
+    def _resolve_memory_scope(
+        self,
+        user_input: str,
+        conversation_mode: str,
+        visibility_scope: Optional[str],
+        allowed_modes: Optional[Iterable[str]],
+    ) -> MemoryScope:
+        normalized_mode = self._normalize_mode(conversation_mode)
+        explicit_modes = tuple(self._normalize_mode(mode) for mode in (allowed_modes or []) if mode)
+        requested_scope = self._normalize_visibility_scope(visibility_scope) if visibility_scope else None
+        inferred_scope = self._infer_scope_from_text(user_input, normalized_mode)
+
+        final_scope = requested_scope or inferred_scope.visibility_scope
+        final_modes = explicit_modes or inferred_scope.allowed_modes
+        reason = inferred_scope.restricted_reason
+
+        if final_scope in {"restricted", "private"} and not final_modes:
+            final_modes = (normalized_mode,)
+            reason = reason or "restricted_to_current_mode"
+
+        if final_scope == "global":
+            final_modes = ()
+            reason = None
+
+        return MemoryScope(
+            conversation_mode=normalized_mode,
+            visibility_scope=final_scope,
+            allowed_modes=tuple(dict.fromkeys(final_modes)),
+            restricted_reason=reason,
+        )
+
+    def _infer_scope_from_text(self, text: str, current_mode: str) -> MemoryScope:
+        lowered = text.lower()
+        secrecy_markers = [
+            "keep this secret",
+            "keep it secret",
+            "don't use this in",
+            "do not use this in",
+            "only use this in",
+            "only remember this in",
+            "only accessible",
+            "between us",
+        ]
+        if not any(marker in lowered for marker in secrecy_markers):
+            return MemoryScope(conversation_mode=current_mode)
+
+        mentioned_modes = self._extract_modes_from_text(lowered)
+        allowed_modes = tuple(mentioned_modes or [current_mode])
+        return MemoryScope(
+            conversation_mode=current_mode,
+            visibility_scope="restricted",
+            allowed_modes=allowed_modes,
+            restricted_reason="user_requested_sealed_memory",
+        )
+
+    def _extract_modes_from_text(self, lowered_text: str) -> list[str]:
+        aliases = {
+            "friend": "friend",
+            "close friend": "friend",
+            "coach": "coach",
+            "life coach": "coach",
+            "strategy": "strategy",
+            "strategist": "strategy",
+            "support": "support",
+            "emotional support": "support",
+            "therapy": "support",
+            "therapist": "support",
+            "creative": "creative",
+            "technical": "technical",
+        }
+        modes: list[str] = []
+        for phrase, mode in aliases.items():
+            if phrase in lowered_text and mode not in modes:
+                modes.append(mode)
+        return modes
+
+    def _normalize_mode(self, value: str) -> str:
+        normalized = self._slug(value or "general")
+        return normalized or "general"
+
+    def _normalize_visibility_scope(self, value: str) -> str:
+        normalized = (value or "global").strip().lower()
+        if normalized in {"restricted", "private", "global"}:
+            return normalized
+        return "global"
 
     def _compute_salience(self, user_input: str, assessment: Assessment) -> float:
         score = 0.42

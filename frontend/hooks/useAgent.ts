@@ -18,6 +18,9 @@ type ServerPayload = {
   turnId?: number;
 };
 
+const MINIMUM_SPEECH_ACTIVE_MS = 180;
+const MINIMUM_SPEECH_PEAK_LEVEL = 0.08;
+
 export function useAgent() {
   const [responsePreview, setResponsePreview] = useState("");
   const responsePreviewRef = useRef("");
@@ -44,6 +47,9 @@ export function useAgent() {
   const mediaSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const silenceCheckFrameRef = useRef<number | null>(null);
   const speechDetectedRef = useRef(false);
+  const speechActiveMsRef = useRef(0);
+  const peakInputLevelRef = useRef(0);
+  const lastMonitorAtRef = useRef(0);
   const lastSpeechAtRef = useRef(0);
   const listeningStartedAtRef = useRef(0);
   const autoStopInFlightRef = useRef(false);
@@ -470,8 +476,11 @@ export function useAgent() {
 
         autoStopInFlightRef.current = false;
         speechDetectedRef.current = false;
+        speechActiveMsRef.current = 0;
+        peakInputLevelRef.current = 0;
         listeningStartedAtRef.current = performance.now();
         lastSpeechAtRef.current = listeningStartedAtRef.current;
+        lastMonitorAtRef.current = listeningStartedAtRef.current;
         startAudioMonitoring({
           activeInputTurnIdRef,
           analyserDataRef,
@@ -490,8 +499,11 @@ export function useAgent() {
             void stopListening();
           },
           pauseToleranceSecondsRef,
+          peakInputLevelRef,
           silenceCheckFrameRef,
+          speechActiveMsRef,
           speechDetectedRef,
+          lastMonitorAtRef,
           lastSpeechAtRef,
           stream,
           turnId,
@@ -563,23 +575,67 @@ export function useAgent() {
       setOrbInputLevel(0);
 
       try {
+        const hadDetectedSpeech =
+          speechDetectedRef.current &&
+          speechActiveMsRef.current >= MINIMUM_SPEECH_ACTIVE_MS &&
+          peakInputLevelRef.current >= MINIMUM_SPEECH_PEAK_LEVEL;
         stopAudioMonitoring({
           analyserNodeRef,
           audioContextRef,
           mediaSourceNodeRef,
           silenceCheckFrameRef,
         });
+
+        if (!hadDetectedSpeech) {
+          await stopStreamedMediaRecorder({
+            chunkSendQueueRef,
+            mediaRecorder,
+            socketRef,
+            turnId,
+            sendInputEnd: false,
+          });
+
+          socketRef.current?.send(
+            JSON.stringify({
+              type: "input_cancel",
+              turnId,
+              reason: "no_speech_detected",
+            })
+          );
+
+          activeInputTurnIdRef.current = null;
+          mediaRecorderRef.current = null;
+          mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+          mediaStreamRef.current = null;
+          autoStopInFlightRef.current = false;
+          speechDetectedRef.current = false;
+          speechActiveMsRef.current = 0;
+          peakInputLevelRef.current = 0;
+          lastMonitorAtRef.current = 0;
+          setConversationState("ready");
+          setThinking(false);
+          setStatusMessage("Ready");
+          return;
+        }
+
         await stopStreamedMediaRecorder({
           chunkSendQueueRef,
           mediaRecorder,
+          peakInputLevel: peakInputLevelRef.current,
           socketRef,
+          speechActiveMs: speechActiveMsRef.current,
           turnId,
+          sendInputEnd: true,
         });
 
         mediaRecorderRef.current = null;
         mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
         mediaStreamRef.current = null;
         autoStopInFlightRef.current = false;
+        speechDetectedRef.current = false;
+        speechActiveMsRef.current = 0;
+        peakInputLevelRef.current = 0;
+        lastMonitorAtRef.current = 0;
 
         setConversationState("thinking");
         setThinking(true);
@@ -590,6 +646,10 @@ export function useAgent() {
         mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
         mediaStreamRef.current = null;
         autoStopInFlightRef.current = false;
+        speechDetectedRef.current = false;
+        speechActiveMsRef.current = 0;
+        peakInputLevelRef.current = 0;
+        lastMonitorAtRef.current = 0;
         setConversationState("error");
         setThinking(false);
         setOrbInputLevel(0);
@@ -958,12 +1018,18 @@ function queueAudioChunkSend({
 function stopStreamedMediaRecorder({
   chunkSendQueueRef,
   mediaRecorder,
+  peakInputLevel,
+  sendInputEnd = true,
   socketRef,
+  speechActiveMs,
   turnId,
 }: {
   chunkSendQueueRef: MutableRefObject<Promise<void>>;
   mediaRecorder: MediaRecorder;
+  peakInputLevel?: number;
+  sendInputEnd?: boolean;
   socketRef: MutableRefObject<WebSocket | null>;
+  speechActiveMs?: number;
   turnId: number;
 }) {
   return new Promise<void>((resolve, reject) => {
@@ -972,11 +1038,13 @@ function stopStreamedMediaRecorder({
         .catch(() => undefined)
         .then(() => {
           const socket = socketRef.current;
-          if (socket?.readyState === WebSocket.OPEN) {
+          if (sendInputEnd && socket?.readyState === WebSocket.OPEN) {
             socket.send(
               JSON.stringify({
                 type: "input_end",
                 turnId,
+                peakInputLevel,
+                speechActiveMs,
               })
             );
           }
@@ -1004,8 +1072,11 @@ function startAudioMonitoring({
   onLevel,
   onEndpoint,
   pauseToleranceSecondsRef,
+  peakInputLevelRef,
   silenceCheckFrameRef,
+  speechActiveMsRef,
   speechDetectedRef,
+  lastMonitorAtRef,
   lastSpeechAtRef,
   stream,
   turnId,
@@ -1020,8 +1091,11 @@ function startAudioMonitoring({
   onLevel: (value: number) => void;
   onEndpoint: () => void;
   pauseToleranceSecondsRef: MutableRefObject<number>;
+  peakInputLevelRef: MutableRefObject<number>;
   silenceCheckFrameRef: MutableRefObject<number | null>;
+  speechActiveMsRef: MutableRefObject<number>;
   speechDetectedRef: MutableRefObject<boolean>;
+  lastMonitorAtRef: MutableRefObject<number>;
   lastSpeechAtRef: MutableRefObject<number>;
   stream: MediaStream;
   turnId: number;
@@ -1061,7 +1135,7 @@ function startAudioMonitoring({
   ) as unknown as Float32Array<ArrayBuffer>;
 
   const minimumTurnDurationMs = 550;
-  const levelThreshold = 0.018;
+  const levelThreshold = 0.022;
 
   const tick = () => {
     if (
@@ -1082,12 +1156,22 @@ function startAudioMonitoring({
 
     const rms = Math.sqrt(sumSquares / analyserDataRef.current.length);
     const now = performance.now();
+    const deltaMs = Math.min(Math.max(now - lastMonitorAtRef.current, 0), 50);
+    lastMonitorAtRef.current = now;
     const normalizedLevel = Math.max(0, Math.min(1, (rms - 0.008) / 0.072));
+    peakInputLevelRef.current = Math.max(peakInputLevelRef.current, normalizedLevel);
     onLevel(normalizedLevel);
 
     if (rms >= levelThreshold) {
-      speechDetectedRef.current = true;
+      speechActiveMsRef.current += deltaMs;
       lastSpeechAtRef.current = now;
+
+      if (
+        speechActiveMsRef.current >= MINIMUM_SPEECH_ACTIVE_MS &&
+        peakInputLevelRef.current >= MINIMUM_SPEECH_PEAK_LEVEL
+      ) {
+        speechDetectedRef.current = true;
+      }
     }
 
     const pauseToleranceMs = Math.max(650, pauseToleranceSecondsRef.current * 1000);

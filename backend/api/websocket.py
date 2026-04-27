@@ -10,6 +10,9 @@ from core.agent import get_agent
 
 logger = logging.getLogger(__name__)
 
+MINIMUM_SPEECH_ACTIVE_MS = 180.0
+MINIMUM_SPEECH_PEAK_LEVEL = 0.08
+
 
 def register_websocket_routes(app: FastAPI) -> None:
     @app.websocket("/ws/{user_id}")
@@ -23,6 +26,7 @@ def register_websocket_routes(app: FastAPI) -> None:
         pending_audio_chunks: list[bytes] = []
         pending_audio_filename = "audio.webm"
         pending_audio_stream_response = False
+        pending_audio_metadata: dict[str, Any] = {}
         turn_counter = 0
 
         async def send_event(payload: dict[str, Any]) -> None:
@@ -38,7 +42,7 @@ def register_websocket_routes(app: FastAPI) -> None:
                 logger.exception("Detached turn task failed")
 
         async def cancel_current_turn(reason: str, announce: bool) -> bool:
-            nonlocal current_turn_id, current_turn_task, pending_audio_turn_id, pending_audio_chunks, pending_audio_filename, pending_audio_stream_response
+            nonlocal current_turn_id, current_turn_task, pending_audio_turn_id, pending_audio_chunks, pending_audio_filename, pending_audio_stream_response, pending_audio_metadata
 
             task = current_turn_task
             had_active_turn = bool(task and not task.done())
@@ -49,6 +53,7 @@ def register_websocket_routes(app: FastAPI) -> None:
             pending_audio_chunks = []
             pending_audio_filename = "audio.webm"
             pending_audio_stream_response = False
+            pending_audio_metadata = {}
 
             if task and not task.done():
                 task.cancel()
@@ -93,11 +98,17 @@ def register_websocket_routes(app: FastAPI) -> None:
                             user_id=user_id,
                             audio_data=audio_data or base64.b64decode(str(data.get("audio"))),
                             audio_filename=audio_filename,
+                            conversation_mode=_conversation_mode(data),
+                            visibility_scope=_visibility_scope(data),
+                            allowed_modes=_allowed_modes(data),
                         )
                         if message_type == "audio"
                         else agent.stream_input(
                             user_id=user_id,
                             user_input=str(data.get("text", "")).strip(),
+                            conversation_mode=_conversation_mode(data),
+                            visibility_scope=_visibility_scope(data),
+                            allowed_modes=_allowed_modes(data),
                         )
                     )
 
@@ -167,11 +178,17 @@ def register_websocket_routes(app: FastAPI) -> None:
                             user_id=user_id,
                             audio_data=audio_data or base64.b64decode(str(data.get("audio"))),
                             audio_filename=audio_filename,
+                            conversation_mode=_conversation_mode(data),
+                            visibility_scope=_visibility_scope(data),
+                            allowed_modes=_allowed_modes(data),
                         )
                     else:
                         response = await agent.process_input(
                             user_id=user_id,
                             user_input=str(data.get("text", "")).strip(),
+                            conversation_mode=_conversation_mode(data),
+                            visibility_scope=_visibility_scope(data),
+                            allowed_modes=_allowed_modes(data),
                         )
 
                     if current_turn_id != turn_id:
@@ -254,11 +271,38 @@ def register_websocket_routes(app: FastAPI) -> None:
                             str(data.get("audioMimeType") or data.get("mimeType") or "")
                         )
                         pending_audio_stream_response = bool(data.get("preferStreamingResponse"))
+                        pending_audio_metadata = {
+                            "conversationMode": data.get("conversationMode") or data.get("conversation_mode"),
+                            "visibilityScope": data.get("visibilityScope") or data.get("visibility_scope"),
+                            "allowedModes": data.get("allowedModes") or data.get("allowed_modes"),
+                        }
                         turn_counter = max(turn_counter, turn_id)
                         await send_event(
                             {
                                 "type": "listening",
                                 "turnId": turn_id,
+                            }
+                        )
+                        continue
+
+                    if message_type == "input_cancel":
+                        turn_id = _coerce_turn_id(data.get("turnId"))
+                        if turn_id is not None and turn_id == pending_audio_turn_id:
+                            pending_audio_turn_id = None
+                            pending_audio_chunks = []
+                            pending_audio_filename = "audio.webm"
+                            pending_audio_stream_response = False
+                            pending_audio_metadata = {}
+                        await send_event(
+                            {
+                                "type": "ready",
+                                "turnId": turn_id,
+                                "pauseToleranceSeconds": float(
+                                    (await agent.memory.dialogue_profile(user_id)).get(
+                                        "pause_tolerance_seconds",
+                                        0.9,
+                                    )
+                                ),
                             }
                         )
                         continue
@@ -298,6 +342,34 @@ def register_websocket_routes(app: FastAPI) -> None:
                             )
                             continue
 
+                        speech_active_ms = _coerce_float(data.get("speechActiveMs"))
+                        peak_input_level = _coerce_float(data.get("peakInputLevel"))
+                        if (
+                            speech_active_ms is not None
+                            and peak_input_level is not None
+                            and (
+                                speech_active_ms < MINIMUM_SPEECH_ACTIVE_MS
+                                or peak_input_level < MINIMUM_SPEECH_PEAK_LEVEL
+                            )
+                        ):
+                            pending_audio_turn_id = None
+                            pending_audio_chunks = []
+                            pending_audio_filename = "audio.webm"
+                            pending_audio_stream_response = False
+                            await send_event(
+                                {
+                                    "type": "ready",
+                                    "turnId": turn_id,
+                                    "pauseToleranceSeconds": float(
+                                        (await agent.memory.dialogue_profile(user_id)).get(
+                                            "pause_tolerance_seconds",
+                                            0.9,
+                                        )
+                                    ),
+                                }
+                            )
+                            continue
+
                         if not pending_audio_chunks:
                             pending_audio_turn_id = None
                             pending_audio_filename = "audio.webm"
@@ -315,17 +387,19 @@ def register_websocket_routes(app: FastAPI) -> None:
                         audio_bytes = b"".join(pending_audio_chunks)
                         audio_filename = pending_audio_filename
                         prefer_streaming_response = pending_audio_stream_response
+                        metadata = pending_audio_metadata
                         pending_audio_turn_id = None
                         pending_audio_chunks = []
                         pending_audio_filename = "audio.webm"
                         pending_audio_stream_response = False
+                        pending_audio_metadata = {}
                         turn_counter = max(turn_counter, turn_id)
                         current_turn_id = turn_id
                         current_turn_task = asyncio.create_task(
                             handle_turn(
                                 turn_id,
                                 "audio",
-                                {},
+                                metadata,
                                 audio_data=audio_bytes,
                                 audio_filename=audio_filename,
                                 prefer_streaming_response=prefer_streaming_response,
@@ -392,6 +466,15 @@ def _coerce_turn_id(raw_value: Any) -> Optional[int]:
         return None
 
 
+def _coerce_float(raw_value: Any) -> Optional[float]:
+    if raw_value is None:
+        return None
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _audio_filename_for_mime(mime_type: str) -> str:
     normalized = mime_type.strip().lower()
     if "wav" in normalized:
@@ -403,6 +486,33 @@ def _audio_filename_for_mime(mime_type: str) -> str:
     if "ogg" in normalized:
         return "audio.ogg"
     return "audio.webm"
+
+
+def _conversation_mode(data: dict[str, Any]) -> str:
+    raw_value = data.get("conversationMode") or data.get("conversation_mode") or "general"
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(raw_value).lower()).strip("-")
+    return normalized or "general"
+
+
+def _visibility_scope(data: dict[str, Any]) -> Optional[str]:
+    raw_value = data.get("visibilityScope") or data.get("visibility_scope")
+    if raw_value is None:
+        return None
+    normalized = str(raw_value).strip().lower()
+    return normalized if normalized in {"global", "restricted", "private"} else None
+
+
+def _allowed_modes(data: dict[str, Any]) -> Optional[list[str]]:
+    raw_value = data.get("allowedModes") or data.get("allowed_modes")
+    if raw_value is None:
+        return None
+    if isinstance(raw_value, str):
+        values = [raw_value]
+    elif isinstance(raw_value, list):
+        values = [str(value) for value in raw_value]
+    else:
+        return None
+    return [re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") for value in values if value]
 
 
 def _drain_completed_sentences(buffer: str) -> tuple[list[str], str]:

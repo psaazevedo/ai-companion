@@ -32,6 +32,7 @@ class ContextualStateService:
                     SELECT emotional_tone, timestamp
                     FROM episodes
                     WHERE user_id = %s
+                      AND visibility_scope = 'global'
                     ORDER BY timestamp DESC
                     LIMIT 6
                     """,
@@ -45,6 +46,7 @@ class ContextualStateService:
                     FROM semantic_memories
                     WHERE user_id = %s
                       AND memory_status IN ('active', 'pinned')
+                      AND visibility_scope = 'global'
                     ORDER BY confidence DESC, reinforcement_count DESC, last_updated DESC
                     LIMIT 12
                     """,
@@ -58,6 +60,7 @@ class ContextualStateService:
                     FROM procedural_memories
                     WHERE user_id = %s
                       AND memory_status IN ('active', 'pinned')
+                      AND visibility_scope = 'global'
                     ORDER BY confidence DESC, reinforcement_count DESC, last_updated DESC
                     LIMIT 8
                     """,

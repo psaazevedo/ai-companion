@@ -140,6 +140,7 @@ class ProactiveService:
                     FROM semantic_memories
                     WHERE user_id = %s
                       AND memory_status IN ('active', 'pinned')
+                      AND visibility_scope = 'global'
                     ORDER BY confidence DESC, reinforcement_count DESC, last_updated DESC
                     """,
                     (user_id,),
@@ -160,6 +161,7 @@ class ProactiveService:
                     FROM procedural_memories
                     WHERE user_id = %s
                       AND memory_status IN ('active', 'pinned')
+                      AND visibility_scope = 'global'
                     ORDER BY confidence DESC, reinforcement_count DESC, last_updated DESC
                     """,
                     (user_id,),
@@ -176,6 +178,7 @@ class ProactiveService:
                         summary
                     FROM episodes
                     WHERE user_id = %s
+                      AND visibility_scope = 'global'
                     ORDER BY timestamp DESC
                     LIMIT 12
                     """,

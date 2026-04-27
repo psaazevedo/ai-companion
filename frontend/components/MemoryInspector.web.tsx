@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import { RefreshCw, X } from "lucide-react-native";
 
 import {
   type AtlasEdge,
@@ -20,6 +23,7 @@ type MemoryInspectorProps = {
   userId: string;
   visible: boolean;
   onClose: () => void;
+  progress?: Animated.Value;
 };
 
 type AtlasTab = "map" | "timeline" | "patterns";
@@ -65,11 +69,13 @@ const GROUP_COLORS: Record<string, string> = {
 export function MemoryInspector({
   userId,
   visible,
-  onClose,
+  progress,
 }: MemoryInspectorProps) {
   const { snapshot, isLoading, error, refresh } = useMemoryAtlas(userId, visible);
   const [tab, setTab] = useState<AtlasTab>("map");
   const [selectedNodeId, setSelectedNodeId] = useState<string>("user");
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const flyoutProgress = useRef(new Animated.Value(0)).current;
 
   const visibleNodes = useMemo(() => {
     if (!snapshot) {
@@ -107,54 +113,100 @@ export function MemoryInspector({
     }
   }, [selectedNodeId, visible, visibleNodes]);
 
+  useEffect(() => {
+    if (!visible || tab !== "map") {
+      setInspectorOpen(false);
+    }
+  }, [tab, visible]);
+
+  useEffect(() => {
+    Animated.timing(flyoutProgress, {
+      toValue: inspectorOpen ? 1 : 0,
+      duration: inspectorOpen ? 360 : 240,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [flyoutProgress, inspectorOpen]);
+
   const selectedNode =
     visibleNodes.find((node) => node.id === selectedNodeId) ?? visibleNodes[0] ?? null;
   const evidence = selectedNode ? snapshot?.evidence[selectedNode.id] ?? [] : [];
+  const handleSelectNode = (nodeId: string) => {
+    setSelectedNodeId(nodeId);
+    if (nodeId !== "user") {
+      setInspectorOpen(true);
+    }
+  };
+  const flyoutStyle = {
+    opacity: flyoutProgress,
+    transform: [
+      {
+        translateX: flyoutProgress.interpolate({
+          inputRange: [0, 1],
+          outputRange: [34, 0],
+        }),
+      },
+    ],
+  };
 
   if (!visible) {
     return null;
   }
 
+  const entranceStyle = progress
+    ? {
+        opacity: progress,
+        transform: [
+          {
+            scale: progress.interpolate({
+              inputRange: [0, 1],
+              outputRange: [0.985, 1],
+            }),
+          },
+        ],
+      }
+    : null;
+
   return (
-    <View style={styles.panel}>
+    <Animated.View style={[styles.panel, entranceStyle]}>
       <View style={styles.header}>
         <View style={styles.headerCopy}>
-          <Text style={styles.eyebrow}>Memory Atlas</Text>
-          <Text style={styles.title}>How the companion currently understands you</Text>
-          <Text style={styles.subtitle}>
-            Distilled concepts, learned response patterns, and the episodes that shaped them.
-          </Text>
+          <Text style={styles.eyebrow}>Atlas</Text>
+          <Text style={styles.subtitle}>What I remember, how strongly, and why.</Text>
         </View>
         <View style={styles.headerActions}>
-          <Pressable onPress={() => void refresh()} style={styles.headerButton}>
-            <Text style={styles.headerButtonLabel}>Refresh</Text>
-          </Pressable>
-          <Pressable onPress={onClose} style={[styles.headerButton, styles.headerButtonGhost]}>
-            <Text style={styles.headerButtonLabel}>Close</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Refresh memory atlas"
+            onPress={() => void refresh()}
+            style={styles.headerButton}
+          >
+            <RefreshCw size={16} color="#DFF8FF" strokeWidth={2} />
           </Pressable>
         </View>
       </View>
 
-      <View style={styles.summaryRow}>
-        {renderSummaryChip("Episodes", snapshot?.summary.episodes ?? 0)}
-        {renderSummaryChip("Semantic", snapshot?.summary.semantic ?? 0)}
-        {renderSummaryChip("Procedural", snapshot?.summary.procedural ?? 0)}
-        {renderSummaryChip("Active", snapshot?.summary.status_counts.active ?? 0)}
-        {renderSummaryChip("Archived", snapshot?.summary.status_counts.archived ?? 0)}
-      </View>
+      <View style={styles.controlRail}>
+        <View style={styles.tabs}>
+          {(["map", "timeline", "patterns"] as AtlasTab[]).map((tabOption) => (
+            <Pressable
+              key={tabOption}
+              onPress={() => setTab(tabOption)}
+              style={[styles.tabButton, tab === tabOption && styles.tabButtonActive]}
+            >
+              <Text style={[styles.tabLabel, tab === tabOption && styles.tabLabelActive]}>
+                {titleCase(tabOption)}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
 
-      <View style={styles.tabs}>
-        {(["map", "timeline", "patterns"] as AtlasTab[]).map((tabOption) => (
-          <Pressable
-            key={tabOption}
-            onPress={() => setTab(tabOption)}
-            style={[styles.tabButton, tab === tabOption && styles.tabButtonActive]}
-          >
-            <Text style={[styles.tabLabel, tab === tabOption && styles.tabLabelActive]}>
-              {titleCase(tabOption)}
-            </Text>
-          </Pressable>
-        ))}
+        <View style={styles.summaryRow}>
+          {renderSummaryChip("episodes", snapshot?.summary.episodes ?? 0)}
+          {renderSummaryChip("beliefs", snapshot?.summary.semantic ?? 0)}
+          {renderSummaryChip("procedures", snapshot?.summary.procedural ?? 0)}
+          {renderSummaryChip("active", snapshot?.summary.status_counts.active ?? 0)}
+        </View>
       </View>
 
       {isLoading ? (
@@ -177,27 +229,46 @@ export function MemoryInspector({
           showsVerticalScrollIndicator={false}
         >
           {tab === "map" ? (
-            <>
-              <View style={styles.mapCard}>
+            <View style={styles.mapWorkspace}>
+              <View style={styles.mapStage}>
                 <AtlasMap
                   nodes={layoutNodes}
                   edges={snapshot.map.edges}
                   selectedNodeId={selectedNode?.id ?? "user"}
-                  onSelect={setSelectedNodeId}
+                  onSelect={handleSelectNode}
                 />
+                {!inspectorOpen ? (
+                  <View pointerEvents="none" style={styles.mapHint}>
+                    <Text style={styles.mapHintText}>Select a memory to inspect it</Text>
+                  </View>
+                ) : null}
               </View>
 
-              {selectedNode ? (
-                <View style={styles.detailCard}>
+              {selectedNode && selectedNode.id !== "user" ? (
+                <Animated.View
+                  pointerEvents={inspectorOpen ? "auto" : "none"}
+                  style={[
+                    styles.detailFlyout,
+                    flyoutStyle,
+                  ]}
+                >
                   <View style={styles.detailHeader}>
-                    <View>
+                    <View style={styles.detailTitleWrap}>
                       <Text style={styles.detailEyebrow}>
                         {selectedNode.layer === "core"
-                          ? "Core Node"
-                          : `${titleCase(selectedNode.layer)} Memory`}
+                          ? "Center"
+                          : titleCase(selectedNode.layer)}
                       </Text>
                       <Text style={styles.detailTitle}>{selectedNode.label}</Text>
                     </View>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Close memory details"
+                      onPress={() => setInspectorOpen(false)}
+                      style={styles.detailClose}
+                    >
+                      <X size={16} color="#DCEBFF" strokeWidth={2.1} />
+                    </Pressable>
                     <View style={styles.statusPills}>
                       <Text style={[styles.statusPill, statusStyle(selectedNode.status)]}>
                         {titleCase(selectedNode.status)}
@@ -223,7 +294,6 @@ export function MemoryInspector({
                     {renderMetric("Strength", `${Math.round(selectedNode.strength * 100)}%`)}
                     {renderMetric("Confidence", `${Math.round(selectedNode.confidence * 100)}%`)}
                     {renderMetric("Reinforced", String(selectedNode.reinforcement_count))}
-                    {renderMetric("Recalled", String(selectedNode.recall_count))}
                   </View>
 
                   {selectedNode.archive_reason ? (
@@ -233,9 +303,9 @@ export function MemoryInspector({
                   ) : null}
 
                   <View style={styles.section}>
-                    <Text style={styles.sectionTitle}>Why the system believes this</Text>
+                    <Text style={styles.sectionTitle}>Sources</Text>
                     {evidence.length ? (
-                      evidence.map((episode) => (
+                      evidence.slice(0, 2).map((episode) => (
                         <View key={episode.id} style={styles.evidenceCard}>
                           <View style={styles.evidenceMeta}>
                             <Text style={styles.evidenceTone}>
@@ -245,34 +315,37 @@ export function MemoryInspector({
                               {formatDate(episode.timestamp)}
                             </Text>
                           </View>
-                          <Text style={styles.evidenceSummary}>{episode.summary}</Text>
+                          <Text style={styles.evidenceSummary} numberOfLines={3}>
+                            {cleanEvidenceSummary(episode.summary)}
+                          </Text>
                         </View>
                       ))
                     ) : (
                       <Text style={styles.emptyHint}>
-                        This memory is currently distilled more from reinforcement than from one
-                        explicit source episode.
+                        Distilled from repeated reinforcement rather than one clear episode.
                       </Text>
                     )}
                   </View>
 
                   {snapshot.map.relations.length ? (
                     <View style={styles.section}>
-                      <Text style={styles.sectionTitle}>Nearby relationships</Text>
+                      <Text style={styles.sectionTitle}>Connected to</Text>
                       <View style={styles.relationWrap}>
-                        {relatedRelations(snapshot.map.relations, selectedNode).map((relation) => (
-                          <View key={relation.id} style={styles.relationChip}>
-                            <Text style={styles.relationText}>
-                              {relation.source_label} {relation.relation} {relation.target_label}
-                            </Text>
-                          </View>
-                        ))}
+                        {relatedRelations(snapshot.map.relations, selectedNode)
+                          .slice(0, 5)
+                          .map((relation) => (
+                            <View key={relation.id} style={styles.relationChip}>
+                              <Text style={styles.relationText}>
+                                {relation.source_label} {relation.relation} {relation.target_label}
+                              </Text>
+                            </View>
+                          ))}
                       </View>
                     </View>
                   ) : null}
-                </View>
+                </Animated.View>
               ) : null}
-            </>
+            </View>
           ) : null}
 
           {tab === "timeline" ? (
@@ -316,7 +389,7 @@ export function MemoryInspector({
           ) : null}
         </ScrollView>
       ) : null}
-    </View>
+    </Animated.View>
   );
 }
 
@@ -394,8 +467,8 @@ function AtlasMap({
         </linearGradient>
       </defs>
 
-      <rect x="0" y="0" width="760" height="520" rx="28" fill="#0A0F1D" />
-      <circle cx="380" cy="250" r="160" fill="url(#atlasCore)" />
+      <rect x="0" y="0" width="760" height="520" rx="28" fill="transparent" />
+      <circle cx="380" cy="250" r="168" fill="url(#atlasCore)" />
       <circle
         cx="380"
         cy="250"
@@ -476,9 +549,10 @@ function AtlasMap({
             <text
               x={node.x}
               y={node.y + node.radius + 18}
-              fill={isSelected ? "#F5F8FF" : "#AFC0E8"}
+              fill="#F5F8FF"
               fontSize="11"
               textAnchor="middle"
+              opacity={isSelected ? 1 : 0}
             >
               {node.label}
             </text>
@@ -679,125 +753,129 @@ function formatDate(value: string | null) {
   }).format(date);
 }
 
+function cleanEvidenceSummary(value: string) {
+  return value
+    .replace(/^User said:\s*/i, "")
+    .replace(/\s*Agent replied:.*$/i, "")
+    .trim();
+}
+
 const styles = StyleSheet.create({
   panel: {
-    width: 560,
-    maxWidth: 620,
-    minWidth: 460,
-    flexShrink: 0,
-    borderLeftWidth: 1,
-    borderLeftColor: "rgba(143, 170, 222, 0.16)",
-    backgroundColor: "#0A0F19",
-    paddingHorizontal: 24,
-    paddingTop: 24,
-    paddingBottom: 18,
+    position: "absolute",
+    inset: 0,
+    zIndex: 70,
+    backgroundColor: "rgba(8, 11, 20, 0.985)",
+    paddingHorizontal: 42,
+    paddingTop: 78,
+    paddingBottom: 22,
   },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
     gap: 18,
     alignItems: "flex-start",
+    width: "100%",
+    maxWidth: 1240,
+    alignSelf: "center",
   },
   headerCopy: {
     flex: 1,
-    gap: 6,
+    gap: 5,
   },
   eyebrow: {
-    color: "#8AA1D4",
-    fontSize: 11,
-    letterSpacing: 2.8,
+    color: "#F4F8FF",
+    fontSize: 28,
+    lineHeight: 34,
+    letterSpacing: -0.8,
     textTransform: "uppercase",
-    fontWeight: "700",
-  },
-  title: {
-    color: "#F4F7FF",
-    fontSize: 24,
-    lineHeight: 30,
-    fontWeight: "700",
+    fontWeight: "800",
   },
   subtitle: {
-    color: "#9FB0D4",
-    fontSize: 14,
-    lineHeight: 20,
+    color: "#8FA4CC",
+    fontSize: 13,
+    lineHeight: 18,
   },
   headerActions: {
     flexDirection: "row",
     gap: 10,
   },
   headerButton: {
-    paddingHorizontal: 14,
+    width: 38,
     height: 38,
     borderRadius: 999,
-    backgroundColor: "#111A2C",
+    backgroundColor: "rgba(17, 26, 43, 0.64)",
     borderWidth: 1,
-    borderColor: "rgba(146, 229, 255, 0.22)",
+    borderColor: "rgba(146, 229, 255, 0.18)",
     justifyContent: "center",
+    alignItems: "center",
   },
-  headerButtonGhost: {
-    backgroundColor: "#0C1321",
-    borderColor: "rgba(146, 170, 222, 0.16)",
-  },
-  headerButtonLabel: {
-    color: "#E8EEFC",
-    fontSize: 13,
-    fontWeight: "600",
+  controlRail: {
+    width: "100%",
+    maxWidth: 1240,
+    alignSelf: "center",
+    marginTop: 26,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 14,
   },
   summaryRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 10,
-    marginTop: 18,
+    gap: 14,
+    alignItems: "center",
   },
   summaryChip: {
-    minWidth: 92,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 16,
-    backgroundColor: "#101726",
-    borderWidth: 1,
-    borderColor: "rgba(129, 152, 201, 0.18)",
-    gap: 4,
+    flexDirection: "row",
+    alignItems: "baseline",
+    gap: 5,
   },
   summaryLabel: {
-    color: "#8AA1D4",
-    fontSize: 11,
-    textTransform: "uppercase",
-    letterSpacing: 1.3,
-    fontWeight: "700",
+    color: "#7688AE",
+    fontSize: 12,
+    textTransform: "lowercase",
+    letterSpacing: 0.1,
+    fontWeight: "600",
   },
   summaryValue: {
     color: "#F4F7FF",
-    fontSize: 18,
+    fontSize: 14,
     fontWeight: "700",
   },
   tabs: {
     flexDirection: "row",
-    gap: 10,
-    marginTop: 20,
+    gap: 4,
+    padding: 4,
+    borderRadius: 999,
+    backgroundColor: "rgba(11, 17, 31, 0.72)",
+    borderWidth: 1,
+    borderColor: "rgba(129, 152, 201, 0.12)",
   },
   tabButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     borderRadius: 999,
-    backgroundColor: "#0F1524",
-    borderWidth: 1,
-    borderColor: "rgba(129, 152, 201, 0.14)",
+    backgroundColor: "transparent",
   },
   tabButtonActive: {
-    backgroundColor: "rgba(117, 220, 255, 0.12)",
-    borderColor: "rgba(117, 220, 255, 0.28)",
+    backgroundColor: "rgba(223, 248, 255, 0.92)",
   },
   tabLabel: {
-    color: "#93A8D3",
-    fontSize: 13,
-    fontWeight: "600",
+    color: "#8DA0C8",
+    fontSize: 12,
+    fontWeight: "700",
   },
   tabLabelActive: {
-    color: "#EAF7FF",
+    color: "#09101D",
   },
   stateCard: {
     marginTop: 20,
     minHeight: 120,
+    width: "100%",
+    maxWidth: 1240,
+    alignSelf: "center",
     borderRadius: 24,
     backgroundColor: "#0E1423",
     borderWidth: 1,
@@ -812,54 +890,107 @@ const styles = StyleSheet.create({
   },
   scroll: {
     flex: 1,
-    marginTop: 18,
+    marginTop: 20,
+    width: "100%",
+    maxWidth: 1240,
+    alignSelf: "center",
   },
   scrollContent: {
-    gap: 18,
+    gap: 20,
     paddingBottom: 60,
   },
-  mapCard: {
-    borderRadius: 30,
+  mapWorkspace: {
+    position: "relative",
+    minHeight: 620,
+  },
+  mapStage: {
+    width: "100%",
+    borderRadius: 34,
     overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "rgba(129, 152, 201, 0.14)",
-    backgroundColor: "#0B101D",
+    backgroundColor: "rgba(10, 16, 29, 0.38)",
+    shadowColor: "#7FDBFF",
+    shadowOpacity: 0.08,
+    shadowRadius: 34,
+    shadowOffset: { width: 0, height: 0 },
   },
   mapSvg: {
     width: "100%",
-    aspectRatio: 1.46,
+    minHeight: 610,
+    aspectRatio: 1.58,
   },
-  detailCard: {
-    padding: 20,
-    borderRadius: 26,
-    backgroundColor: "#0F1626",
+  mapHint: {
+    position: "absolute",
+    left: 24,
+    bottom: 24,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: "rgba(8, 13, 25, 0.58)",
     borderWidth: 1,
-    borderColor: "rgba(129, 152, 201, 0.14)",
-    gap: 16,
+    borderColor: "rgba(146, 229, 255, 0.12)",
+  },
+  mapHintText: {
+    color: "#8DA0C8",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  detailFlyout: {
+    position: "absolute",
+    top: 22,
+    right: 22,
+    bottom: 22,
+    width: 390,
+    padding: 20,
+    borderRadius: 32,
+    backgroundColor: "rgba(9, 14, 26, 0.88)",
+    borderWidth: 1,
+    borderColor: "rgba(146, 229, 255, 0.16)",
+    gap: 18,
+    shadowColor: "#84ECFF",
+    shadowOpacity: 0.16,
+    shadowRadius: 40,
+    shadowOffset: { width: 0, height: 0 },
   },
   detailHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: 16,
+    gap: 14,
+    paddingBottom: 18,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(146, 229, 255, 0.13)",
+  },
+  detailTitleWrap: {
+    gap: 5,
+    paddingRight: 48,
+  },
+  detailClose: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    width: 34,
+    height: 34,
+    borderRadius: 999,
+    backgroundColor: "rgba(17, 26, 43, 0.72)",
+    borderWidth: 1,
+    borderColor: "rgba(146, 229, 255, 0.16)",
+    alignItems: "center",
+    justifyContent: "center",
   },
   detailEyebrow: {
-    color: "#8BA2D5",
+    color: "#8CEBFF",
     fontSize: 11,
     textTransform: "uppercase",
     letterSpacing: 1.8,
     fontWeight: "700",
-    marginBottom: 5,
   },
   detailTitle: {
     color: "#F4F7FF",
-    fontSize: 24,
-    lineHeight: 28,
-    fontWeight: "700",
-    maxWidth: 300,
+    fontSize: 30,
+    lineHeight: 34,
+    fontWeight: "800",
+    letterSpacing: -0.8,
   },
   statusPills: {
-    alignItems: "flex-end",
+    flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8,
   },
   statusPill: {
@@ -874,9 +1005,9 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
   },
   detailBody: {
-    color: "#DAE4FA",
-    fontSize: 15,
-    lineHeight: 22,
+    color: "#CFDAF3",
+    fontSize: 16,
+    lineHeight: 24,
   },
   metricsRow: {
     flexDirection: "row",
@@ -884,25 +1015,23 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   metricCard: {
-    minWidth: 108,
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    borderRadius: 16,
-    backgroundColor: "#10192B",
-    borderWidth: 1,
-    borderColor: "rgba(129, 152, 201, 0.12)",
-    gap: 4,
+    flex: 1,
+    minWidth: 74,
+    paddingVertical: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(129, 152, 201, 0.12)",
+    gap: 2,
   },
   metricLabel: {
-    color: "#8AA1D4",
-    fontSize: 11,
-    textTransform: "uppercase",
-    letterSpacing: 1.1,
-    fontWeight: "700",
+    color: "#8195BE",
+    fontSize: 10,
+    textTransform: "lowercase",
+    letterSpacing: 0.2,
+    fontWeight: "600",
   },
   metricValue: {
     color: "#F4F7FF",
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: "700",
   },
   archiveNote: {
@@ -914,16 +1043,18 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   sectionTitle: {
-    color: "#F4F7FF",
-    fontSize: 16,
+    color: "#F4F8FF",
+    fontSize: 13,
     fontWeight: "700",
+    letterSpacing: 0.4,
   },
   evidenceCard: {
-    padding: 14,
-    borderRadius: 16,
-    backgroundColor: "#10192A",
-    borderWidth: 1,
-    borderColor: "rgba(129, 152, 201, 0.12)",
+    paddingVertical: 12,
+    paddingHorizontal: 0,
+    borderRadius: 0,
+    backgroundColor: "transparent",
+    borderTopWidth: 1,
+    borderTopColor: "rgba(129, 152, 201, 0.12)",
     gap: 8,
   },
   evidenceMeta: {
@@ -943,9 +1074,9 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   evidenceSummary: {
-    color: "#D2DCF2",
-    fontSize: 14,
-    lineHeight: 20,
+    color: "#B9C7E4",
+    fontSize: 13,
+    lineHeight: 19,
   },
   emptyHint: {
     color: "#93A5CA",
@@ -970,14 +1101,14 @@ const styles = StyleSheet.create({
     fontSize: 12,
   },
   timelineStack: {
-    gap: 14,
+    gap: 10,
   },
   timelineCard: {
-    padding: 18,
-    borderRadius: 22,
-    backgroundColor: "#0F1626",
-    borderWidth: 1,
-    borderColor: "rgba(129, 152, 201, 0.12)",
+    paddingVertical: 18,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(129, 152, 201, 0.12)",
+    backgroundColor: "transparent",
     gap: 12,
   },
   timelineHeader: {
@@ -1018,14 +1149,14 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   patternStack: {
-    gap: 18,
+    gap: 20,
   },
   patternCard: {
     padding: 16,
-    borderRadius: 18,
-    backgroundColor: "#0F1626",
+    borderRadius: 24,
+    backgroundColor: "rgba(15, 22, 38, 0.62)",
     borderWidth: 1,
-    borderColor: "rgba(129, 152, 201, 0.12)",
+    borderColor: "rgba(129, 152, 201, 0.1)",
     gap: 8,
   },
   patternHeader: {

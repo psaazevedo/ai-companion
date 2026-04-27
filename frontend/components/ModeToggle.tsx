@@ -1,4 +1,4 @@
-import { MessageCircle, Mic } from "lucide-react-native";
+import { AudioLines, MessageCircle } from "lucide-react-native";
 import { Pressable, StyleSheet, View } from "react-native";
 
 type ModeToggleProps = {
@@ -14,10 +14,10 @@ export function ModeToggle({ mode, onChange }: ModeToggleProps) {
         onPress={() => onChange("voice")}
         style={[styles.option, mode === "voice" ? styles.optionActive : null]}
       >
-        <Mic
-          size={20}
+        <AudioLines
+          size={22}
           color={mode === "voice" ? "#08101D" : "#AFC2E6"}
-          strokeWidth={2.2}
+          strokeWidth={2.4}
         />
       </Pressable>
       <Pressable

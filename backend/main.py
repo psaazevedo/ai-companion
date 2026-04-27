@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routes.health import router as health_router
 from api.routes.memory import router as memory_router
 from api.routes.proactive import router as proactive_router
+from api.routes.tools import router as tools_router
 from api.websocket import register_websocket_routes
 from config import get_settings
 from db.postgres import get_database
@@ -28,6 +29,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(memory_router)
 app.include_router(proactive_router)
+app.include_router(tools_router)
 register_websocket_routes(app)
 
 

@@ -34,9 +34,9 @@ async def memory_stats(user_id: str) -> dict[str, object]:
 
 
 @router.get("/search/{user_id}")
-async def memory_search(user_id: str, q: str) -> dict[str, object]:
+async def memory_search(user_id: str, q: str, mode: str = "general") -> dict[str, object]:
     memory = get_memory_service()
-    results = await memory.retrieve_context(user_id=user_id, query=q)
+    results = await memory.retrieve_context(user_id=user_id, query=q, conversation_mode=mode)
     return {
         "user_id": user_id,
         "query": q,
@@ -45,15 +45,21 @@ async def memory_search(user_id: str, q: str) -> dict[str, object]:
 
 
 @router.get("/atlas/{user_id}")
-async def memory_atlas(user_id: str) -> dict[str, object]:
+async def memory_atlas(user_id: str, mode: str = "general") -> dict[str, object]:
     memory = get_memory_service()
-    return await memory.atlas_snapshot(user_id)
+    return await memory.atlas_snapshot(user_id, conversation_mode=mode)
 
 
 @router.get("/conversation/{user_id}")
-async def memory_conversation(user_id: str, limit: int = 40) -> dict[str, object]:
+async def memory_conversation(user_id: str, limit: int = 40, mode: str = "general") -> dict[str, object]:
     memory = get_memory_service()
-    return await memory.conversation_feed(user_id=user_id, limit=limit)
+    return await memory.conversation_feed(user_id=user_id, limit=limit, conversation_mode=mode)
+
+
+@router.get("/mutations/{user_id}")
+async def memory_mutations(user_id: str, limit: int = 80, mode: str = "general") -> dict[str, object]:
+    memory = get_memory_service()
+    return await memory.mutation_feed(user_id=user_id, limit=limit, conversation_mode=mode)
 
 
 @router.post("/consolidate/{user_id}")

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     background_runner_enabled: bool = True
     consolidation_interval_seconds: int = 900
     proactive_scan_interval_seconds: int = 300
+    internet_search_provider: str = "tavily"
+    tavily_api_key: Optional[str] = None
+    brave_search_api_key: Optional[str] = None
+    internet_search_max_results: int = 5
 
     allowed_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
@@ -70,6 +74,15 @@ class Settings(BaseSettings):
         if self.embedding_provider == "supabase":
             return bool(self.supabase_url and self.supabase_publishable_key)
         return bool(self.embedding_api_key)
+
+    @property
+    def internet_search_enabled(self) -> bool:
+        provider = self.internet_search_provider.lower().strip()
+        if provider == "tavily":
+            return bool(self.tavily_api_key)
+        if provider == "brave":
+            return bool(self.brave_search_api_key)
+        return False
 
 
 @lru_cache

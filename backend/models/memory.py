@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 
 MemoryStatus = Literal["active", "archived", "pinned"]
 MemoryKind = Literal["episodic", "semantic", "procedural", "graph"]
+VisibilityScope = Literal["global", "restricted", "private"]
+MemoryUse = Literal["mention", "silent"]
 
 
 class RetrievedMemory(BaseModel):
@@ -21,6 +23,11 @@ class RetrievedMemory(BaseModel):
     valid_to: Optional[str] = None
     superseded_by: Optional[str] = None
     archive_reason: Optional[str] = None
+    conversation_mode: str = "general"
+    visibility_scope: VisibilityScope = "global"
+    allowed_modes: list[str] = Field(default_factory=list)
+    use: MemoryUse = "mention"
+    relevance_reason: Optional[str] = None
 
 
 class EpisodeRecord(BaseModel):
@@ -37,6 +44,9 @@ class EpisodeRecord(BaseModel):
     stability: float = 1.0
     archive_reason: Optional[str] = None
     dialogue_signals: dict[str, object] = Field(default_factory=dict)
+    conversation_mode: str = "general"
+    visibility_scope: VisibilityScope = "global"
+    allowed_modes: list[str] = Field(default_factory=list)
 
 
 class SemanticRecord(BaseModel):
@@ -52,6 +62,9 @@ class SemanticRecord(BaseModel):
     valid_from: Optional[str] = None
     valid_to: Optional[str] = None
     superseded_by: Optional[str] = None
+    conversation_mode: str = "general"
+    visibility_scope: VisibilityScope = "global"
+    allowed_modes: list[str] = Field(default_factory=list)
 
 
 class ProceduralRecord(BaseModel):
@@ -66,6 +79,9 @@ class ProceduralRecord(BaseModel):
     valid_from: Optional[str] = None
     valid_to: Optional[str] = None
     superseded_by: Optional[str] = None
+    conversation_mode: str = "general"
+    visibility_scope: VisibilityScope = "global"
+    allowed_modes: list[str] = Field(default_factory=list)
 
 
 class GraphFact(BaseModel):
