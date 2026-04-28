@@ -24,7 +24,6 @@ const LENS_ANSWER_CHARS_PER_LINE = 68;
 const LENS_STREAM_PADDING_TOP = 112;
 const LENS_STREAM_PADDING_BOTTOM = 224;
 const LENS_TOP_SPACER = 260;
-const LENS_BOTTOM_SPACER = 900;
 const LENS_FOCUS_Y = 430;
 
 type LensPair = {
@@ -78,6 +77,7 @@ export function ConversationSheet({
   const lensScrollY = useRef(new Animated.Value(0)).current;
   const [inputHeight, setInputHeight] = useState(INPUT_MIN_HEIGHT);
   const [activeLensIndex, setActiveLensIndex] = useState(0);
+  const [scrollViewportHeight, setScrollViewportHeight] = useState(0);
 
   useEffect(() => {
     if (!visible) {
@@ -223,12 +223,26 @@ export function ConversationSheet({
   }, [isSpeaking, pendingUserText, responsePreview, showResponsePreview, turns]);
 
   const lensLayout = useMemo(() => buildLensLayout(lensPairs), [lensPairs]);
+  const lensBottomSpacer = useMemo(() => {
+    const lastLayout = lensLayout[lensLayout.length - 1];
+    if (!lastLayout || scrollViewportHeight <= 0) {
+      return 0;
+    }
+
+    return Math.max(
+      0,
+      scrollViewportHeight -
+        LENS_FOCUS_Y -
+        LENS_STREAM_PADDING_BOTTOM -
+        lastLayout.height / 2
+    );
+  }, [lensLayout, scrollViewportHeight]);
   const lensContentHeight =
     lensLayout.length > 0
       ? LENS_TOP_SPACER +
         lensLayout[lensLayout.length - 1].offset +
         lensLayout[lensLayout.length - 1].height +
-        LENS_BOTTOM_SPACER
+        lensBottomSpacer
       : LENS_MIN_ITEM_HEIGHT;
 
   useEffect(() => {
@@ -278,6 +292,9 @@ export function ConversationSheet({
         </View>
         <ScrollView
           ref={scrollRef}
+          onLayout={(event) => {
+            setScrollViewportHeight(event.nativeEvent.layout.height);
+          }}
           onScroll={Animated.event(
             [{ nativeEvent: { contentOffset: { y: lensScrollY } } }],
             {
