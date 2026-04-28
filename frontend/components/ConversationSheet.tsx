@@ -1,7 +1,5 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  MessageCircle,
-  Mic,
   SendHorizontal,
 } from "lucide-react-native";
 import {
@@ -10,17 +8,37 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  type StyleProp,
   Text,
   TextInput,
   View,
-  type ViewStyle,
 } from "react-native";
 
 import type { ConversationTurn } from "@/hooks/useConversationFeed";
 
 const INPUT_MIN_HEIGHT = 50;
 const INPUT_MAX_HEIGHT = 156;
+const LENS_MIN_ITEM_HEIGHT = 300;
+const LENS_MAX_ITEM_HEIGHT = 620;
+const LENS_PROMPT_CHARS_PER_LINE = 34;
+const LENS_ANSWER_CHARS_PER_LINE = 68;
+const LENS_STREAM_PADDING_TOP = 112;
+const LENS_STREAM_PADDING_BOTTOM = 224;
+const LENS_TOP_SPACER = 260;
+const LENS_BOTTOM_SPACER = 900;
+const LENS_FOCUS_Y = 430;
+
+type LensPair = {
+  id: string;
+  question: string;
+  answer: string;
+  status?: "pending" | "streaming";
+};
+
+type LensLayoutItem = {
+  height: number;
+  offset: number;
+  center: number;
+};
 
 type ConversationSheetProps = {
   visible: boolean;
@@ -57,7 +75,9 @@ export function ConversationSheet({
 }: ConversationSheetProps) {
   const scrollRef = useRef<ScrollView | null>(null);
   const inputRef = useRef<TextInput | null>(null);
+  const lensScrollY = useRef(new Animated.Value(0)).current;
   const [inputHeight, setInputHeight] = useState(INPUT_MIN_HEIGHT);
+  const [activeLensIndex, setActiveLensIndex] = useState(0);
 
   useEffect(() => {
     if (!visible) {
@@ -81,21 +101,17 @@ export function ConversationSheet({
             appRoot.scrollTop = 0;
           }
         };
-        scrollRef.current?.scrollToEnd({ animated: false });
         (inputRef.current as { focus?: (options?: FocusOptions) => void } | null)?.focus?.({
           preventScroll: true,
         });
         window.requestAnimationFrame(keepAppCanvasPinned);
         setTimeout(() => {
-          scrollRef.current?.scrollToEnd({ animated: false });
           keepAppCanvasPinned();
         }, 60);
         setTimeout(() => {
-          scrollRef.current?.scrollToEnd({ animated: false });
           keepAppCanvasPinned();
         }, 180);
       } else {
-        scrollRef.current?.scrollToEnd({ animated: false });
         inputRef.current?.focus();
       }
     }, 120);
@@ -137,6 +153,105 @@ export function ConversationSheet({
     Boolean(responsePreview.trim()) &&
     latestAssistantTurn?.text.trim() === responsePreview.trim();
   const showResponsePreview = Boolean(responsePreview.trim()) && !previewDuplicatesLatestTurn;
+  const lensPairs = useMemo<LensPair[]>(() => {
+    const pairs: LensPair[] = [];
+    let openPair: LensPair | null = null;
+
+    turns.forEach((turn) => {
+      if (turn.role === "user") {
+        if (openPair) {
+          pairs.push(openPair);
+        }
+        openPair = {
+          id: turn.id,
+          question: turn.text,
+          answer: "",
+        };
+        return;
+      }
+
+      if (openPair && !openPair.answer) {
+        openPair = {
+          ...openPair,
+          id: `${openPair.id}:${turn.id}`,
+          answer: turn.text,
+        };
+        pairs.push(openPair);
+        openPair = null;
+        return;
+      }
+
+      pairs.push({
+        id: turn.id,
+        question: "Companion offered",
+        answer: turn.text,
+      });
+    });
+
+    if (openPair) {
+      pairs.push(openPair);
+    }
+
+    if (pendingUserText) {
+      pairs.push({
+        id: `pending:${pendingUserText}`,
+        question: pendingUserText,
+        answer: "Listening for the shape of the answer…",
+        status: "pending",
+      });
+    }
+
+    if (showResponsePreview) {
+      const lastPair = pairs[pairs.length - 1];
+      if (lastPair && !lastPair.answer) {
+        pairs[pairs.length - 1] = {
+          ...lastPair,
+          answer: responsePreview,
+          status: isSpeaking ? "streaming" : undefined,
+        };
+      } else if (!lastPair || lastPair.answer.trim() !== responsePreview.trim()) {
+        pairs.push({
+          id: `preview:${responsePreview}`,
+          question: "Companion is forming",
+          answer: responsePreview,
+          status: isSpeaking ? "streaming" : undefined,
+        });
+      }
+    }
+
+    return pairs;
+  }, [isSpeaking, pendingUserText, responsePreview, showResponsePreview, turns]);
+
+  const lensLayout = useMemo(() => buildLensLayout(lensPairs), [lensPairs]);
+  const lensContentHeight =
+    lensLayout.length > 0
+      ? LENS_TOP_SPACER +
+        lensLayout[lensLayout.length - 1].offset +
+        lensLayout[lensLayout.length - 1].height +
+        LENS_BOTTOM_SPACER
+      : LENS_MIN_ITEM_HEIGHT;
+
+  useEffect(() => {
+    if (!visible || lensPairs.length === 0) {
+      return;
+    }
+    const latestIndex = lensPairs.length - 1;
+    const latestLayout = lensLayout[latestIndex];
+    const latestOffset = latestLayout
+      ? getLensScrollTarget(latestLayout)
+      : 0;
+    setActiveLensIndex(latestIndex);
+    lensScrollY.setValue(latestOffset);
+
+    const timeout = setTimeout(() => {
+      scrollRef.current?.scrollTo({
+        y: Math.max(0, latestOffset),
+        animated: false,
+      });
+    }, 230);
+
+    return () => clearTimeout(timeout);
+  }, [lensLayout, lensPairs.length, lensScrollY, visible]);
 
   return (
     <Animated.View
@@ -155,8 +270,32 @@ export function ConversationSheet({
       ]}
     >
       <View style={styles.modeShell}>
+        <View pointerEvents="none" style={styles.lensField}>
+          <View style={styles.lensAxis} />
+          <View style={[styles.lensParticle, styles.lensParticleOne]} />
+          <View style={[styles.lensParticle, styles.lensParticleTwo]} />
+          <View style={[styles.lensParticle, styles.lensParticleThree]} />
+        </View>
         <ScrollView
           ref={scrollRef}
+          onScroll={Animated.event(
+            [{ nativeEvent: { contentOffset: { y: lensScrollY } } }],
+            {
+              useNativeDriver: true,
+              listener: (event: { nativeEvent: { contentOffset: { y: number } } }) => {
+                const y = event.nativeEvent.contentOffset.y;
+                const focusY = y + LENS_FOCUS_Y - LENS_STREAM_PADDING_TOP;
+                const nextIndex = Math.max(
+                  0,
+                  Math.min(lensPairs.length - 1, findClosestLensIndex(lensLayout, focusY))
+                );
+                if (nextIndex !== activeLensIndex) {
+                  setActiveLensIndex(nextIndex);
+                }
+              },
+            }
+          )}
+          scrollEventThrottle={16}
           style={[
             styles.streamScroll,
             Platform.OS === "web"
@@ -173,7 +312,7 @@ export function ConversationSheet({
         >
           {isLoading ? <Text style={styles.statusText}>Loading the thread…</Text> : null}
           {error ? <Text style={styles.errorText}>{error}</Text> : null}
-          {showEmptyState ? (
+          {showEmptyState || lensPairs.length === 0 ? (
             <View style={styles.emptyState}>
               <Text style={styles.emptyTitle}>The thread begins here</Text>
               <Text style={styles.emptyCopy}>
@@ -181,92 +320,37 @@ export function ConversationSheet({
               </Text>
             </View>
           ) : (
-            <View style={styles.streamRail}>
-              {turns.map((turn) => {
-                const assistant = turn.role === "assistant";
+            <View
+              style={[
+                styles.lensStack,
+                { height: Math.max(lensContentHeight, LENS_MIN_ITEM_HEIGHT) },
+              ]}
+            >
+              {lensPairs.map((pair, index) => {
+                const layout = lensLayout[index];
+                if (!layout || Math.abs(index - activeLensIndex) > 2) {
+                  return null;
+                }
 
                 return (
-                  <RevealRow
-                    key={turn.id}
-                    style={[
-                      styles.storyRow,
-                      assistant ? styles.storyRowAssistant : styles.storyRowUser,
-                    ]}
-                  >
-                    <Animated.View
-                      style={[
-                        styles.storyCard,
-                        assistant ? styles.storyCardAssistant : styles.storyCardUser,
-                      ]}
-                    >
-                      <View style={styles.storyMeta}>
-                        <Text
-                          style={[
-                            styles.storyRole,
-                            assistant ? styles.storyRoleAssistant : styles.storyRoleUser,
-                          ]}
-                        >
-                          {assistant ? "Companion" : "You"}
-                        </Text>
-
-                        <View style={styles.storyMetaRight}>
-                          <ModeTag mode={turn.input_mode} />
-                        </View>
-                      </View>
-
-                      <Text
-                        style={[
-                          styles.storyText,
-                          assistant ? styles.storyTextAssistant : styles.storyTextUser,
-                        ]}
-                      >
-                        {turn.text}
-                      </Text>
-                    </Animated.View>
-                  </RevealRow>
+                  <LensPairView
+                    key={pair.id}
+                    pair={pair}
+                    index={index}
+                    activeIndex={activeLensIndex}
+                    scrollY={lensScrollY}
+                    layout={layout}
+                    previousCenter={
+                      LENS_TOP_SPACER +
+                      (lensLayout[index - 1]?.center ?? layout.center - layout.height)
+                    }
+                    nextCenter={
+                      LENS_TOP_SPACER +
+                      (lensLayout[index + 1]?.center ?? layout.center + layout.height)
+                    }
+                  />
                 );
               })}
-
-              {pendingUserText ? (
-                <RevealRow style={[styles.storyRow, styles.storyRowUser]}>
-                  <Animated.View
-                    style={[
-                      styles.storyCard,
-                      styles.storyCardUser,
-                      styles.storyCardPending,
-                    ]}
-                  >
-                    <View style={styles.storyMeta}>
-                      <Text style={[styles.storyRole, styles.storyRoleUser]}>You</Text>
-                      <View style={styles.storyMetaRight}>
-                        <ModeTag mode="text" />
-                        <Text style={styles.pendingLabel}>Sending</Text>
-                      </View>
-                    </View>
-                    <Text style={[styles.storyText, styles.storyTextUser]}>{pendingUserText}</Text>
-                  </Animated.View>
-                </RevealRow>
-              ) : null}
-
-              {showResponsePreview ? (
-                <RevealRow style={[styles.storyRow, styles.storyRowAssistant]}>
-                  <Animated.View
-                    style={[
-                      styles.storyCard,
-                      styles.storyCardAssistant,
-                      styles.storyCardPreview,
-                    ]}
-                  >
-                    <View style={styles.storyMeta}>
-                      <Text style={[styles.storyRole, styles.storyRoleAssistant]}>Companion</Text>
-                      <View style={styles.storyMetaRight}>
-                        <ModeTag mode={isSpeaking ? "voice" : "text"} />
-                      </View>
-                    </View>
-                    <Text style={[styles.storyText, styles.storyTextAssistant]}>{responsePreview}</Text>
-                  </Animated.View>
-                </RevealRow>
-              ) : null}
             </View>
           )}
         </ScrollView>
@@ -330,14 +414,38 @@ export function ConversationSheet({
   );
 }
 
-function RevealRow({
-  children,
-  style,
+function LensPairView({
+  pair,
+  index,
+  activeIndex,
+  scrollY,
+  layout,
+  previousCenter,
+  nextCenter,
 }: {
-  children: ReactNode;
-  style: StyleProp<ViewStyle>;
+  pair: LensPair;
+  index: number;
+  activeIndex: number;
+  scrollY: Animated.Value;
+  layout: LensLayoutItem;
+  previousCenter: number;
+  nextCenter: number;
 }) {
   const reveal = useRef(new Animated.Value(0)).current;
+  const active = index === activeIndex;
+  const holdStart = LENS_TOP_SPACER + layout.offset + layout.height * 0.18;
+  const holdEnd = LENS_TOP_SPACER + layout.offset + layout.height * 0.82;
+  const focusPosition = Animated.add(scrollY, LENS_FOCUS_Y - LENS_STREAM_PADDING_TOP);
+  const scrollFocus = focusPosition.interpolate({
+    inputRange: [
+      previousCenter,
+      holdStart,
+      holdEnd,
+      nextCenter,
+    ],
+    outputRange: [0, 1, 1, 0],
+    extrapolate: "clamp",
+  });
 
   useEffect(() => {
     Animated.spring(reveal, {
@@ -352,14 +460,25 @@ function RevealRow({
   return (
     <Animated.View
       style={[
-        style,
+        styles.lensItem,
         {
-          opacity: reveal,
+          top: LENS_TOP_SPACER + layout.offset,
+          height: layout.height,
+          opacity: scrollFocus.interpolate({
+            inputRange: [0, 0.5, 1],
+            outputRange: [0.26, 0.56, 1],
+          }),
           transform: [
             {
               translateY: reveal.interpolate({
                 inputRange: [0, 1],
                 outputRange: [12, 0],
+              }),
+            },
+            {
+              scale: scrollFocus.interpolate({
+                inputRange: [0, 0.5, 1],
+                outputRange: [0.68, 0.84, 1],
               }),
             },
             {
@@ -372,23 +491,82 @@ function RevealRow({
         },
       ]}
     >
-      {children}
+      <View style={styles.lensExchange}>
+          <View style={styles.lensPromptPill}>
+          <Text numberOfLines={2} style={styles.lensQuestion}>
+            {pair.question}
+          </Text>
+          {active && pair.status ? (
+            <Text style={styles.lensStatus}>{pair.status}</Text>
+          ) : null}
+        </View>
+        <View style={styles.lensConnector} />
+        <View style={styles.lensAnswerPanel}>
+          <Text style={styles.lensAnswer}>
+            {pair.answer || "Still forming the answer…"}
+          </Text>
+        </View>
+      </View>
     </Animated.View>
   );
 }
 
-function ModeTag({ mode }: { mode: "voice" | "text" | string }) {
-  const voice = mode === "voice";
+function buildLensLayout(pairs: LensPair[]): LensLayoutItem[] {
+  let offset = 0;
 
-  return (
-    <View style={[styles.modeTag, voice ? styles.modeTagVoice : styles.modeTagText]}>
-      {voice ? (
-        <Mic size={15} color="#AEEFFF" strokeWidth={2.2} />
-      ) : (
-        <MessageCircle size={15} color="#F1CCFF" strokeWidth={2.2} />
-      )}
-    </View>
+  return pairs.map((pair) => {
+    const height = estimateLensItemHeight(pair);
+    const item = {
+      height,
+      offset,
+      center: offset + height / 2,
+    };
+    offset += height;
+    return item;
+  });
+}
+
+function estimateLensItemHeight(pair: LensPair) {
+  const questionLines = Math.max(
+    1,
+    Math.ceil(pair.question.trim().length / LENS_PROMPT_CHARS_PER_LINE)
   );
+  const answerText = (pair.answer || "Still forming the answer…").trim();
+  const answerLines = Math.max(2, Math.ceil(answerText.length / LENS_ANSWER_CHARS_PER_LINE));
+  const contentHeight = 126 + questionLines * 20 + answerLines * 25;
+  return Math.min(Math.max(contentHeight, LENS_MIN_ITEM_HEIGHT), LENS_MAX_ITEM_HEIGHT);
+}
+
+function getLensScrollTarget(item: LensLayoutItem) {
+  return Math.max(
+    0,
+    LENS_TOP_SPACER + item.center - (LENS_FOCUS_Y - LENS_STREAM_PADDING_TOP)
+  );
+}
+
+function findClosestLensIndex(layout: LensLayoutItem[], y: number) {
+  if (layout.length === 0) {
+    return 0;
+  }
+
+  let closestIndex = 0;
+  let closestDistance = Number.POSITIVE_INFINITY;
+
+  layout.forEach((item, index) => {
+    const holdStart = LENS_TOP_SPACER + item.offset + item.height * 0.18;
+    const holdEnd = LENS_TOP_SPACER + item.offset + item.height * 0.82;
+    const distance =
+      y >= holdStart && y <= holdEnd
+        ? 0
+        : Math.min(Math.abs(y - holdStart), Math.abs(y - holdEnd));
+
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closestIndex = index;
+    }
+  });
+
+  return closestIndex;
 }
 
 const styles = StyleSheet.create({
@@ -399,8 +577,6 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 112,
     width: "100%",
-    maxWidth: 980,
-    alignSelf: "center",
     marginTop: 0,
     paddingTop: 0,
     zIndex: 22,
@@ -424,26 +600,80 @@ const styles = StyleSheet.create({
     position: "relative",
     flexDirection: "column",
   },
+  lensField: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 0,
+  },
+  lensAura: {
+    position: "absolute",
+    top: -12,
+    left: 0,
+    right: 0,
+    height: 420,
+    backgroundImage:
+      "radial-gradient(ellipse at 50% 0%, rgba(43, 120, 158, 0.09) 0%, rgba(15, 31, 56, 0.045) 44%, rgba(8, 11, 20, 0.01) 70%, rgba(8, 11, 20, 0) 100%)",
+  },
+  lensAxis: {
+    position: "absolute",
+    top: 28,
+    bottom: 86,
+    left: "50%",
+    width: 1,
+    backgroundImage:
+      "linear-gradient(180deg, rgba(139, 231, 255, 0), rgba(139, 231, 255, 0.1) 28%, rgba(139, 231, 255, 0.015) 45%, rgba(226, 143, 255, 0.015) 58%, rgba(139, 231, 255, 0.08) 76%, rgba(139, 231, 255, 0))",
+  },
+  lensParticle: {
+    position: "absolute",
+    width: 5,
+    height: 5,
+    borderRadius: 999,
+    backgroundColor: "rgba(139, 231, 255, 0.42)",
+    shadowColor: "#8BE7FF",
+    shadowOpacity: 0.34,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  lensParticleOne: {
+    top: 118,
+    left: "18%",
+    opacity: 0.52,
+  },
+  lensParticleTwo: {
+    top: 286,
+    right: "16%",
+    opacity: 0.3,
+    backgroundColor: "rgba(226, 143, 255, 0.52)",
+  },
+  lensParticleThree: {
+    bottom: 144,
+    left: "49%",
+    opacity: 0.26,
+  },
   streamScroll: {
     flex: 1,
     flexBasis: 0,
     minHeight: 0,
     flexShrink: 1,
+    zIndex: 2,
   },
   topFade: {
     position: "absolute",
     top: 0,
     left: 0,
     right: 0,
-    height: 112,
+    height: 260,
     zIndex: 6,
     backgroundImage:
-      "linear-gradient(180deg, #080B14 0%, rgba(8, 11, 20, 0.92) 28%, rgba(8, 11, 20, 0.56) 64%, rgba(8, 11, 20, 0) 100%)",
+      "linear-gradient(180deg, rgba(8, 11, 20, 0.76) 0%, rgba(8, 11, 20, 0.5) 26%, rgba(8, 11, 20, 0.22) 54%, rgba(8, 11, 20, 0.06) 78%, rgba(8, 11, 20, 0) 100%)",
   },
   streamContent: {
     paddingHorizontal: 18,
-    paddingTop: 86,
-    paddingBottom: 22,
+    paddingTop: LENS_STREAM_PADDING_TOP,
+    paddingBottom: LENS_STREAM_PADDING_BOTTOM,
     flexGrow: 1,
   },
   statusText: {
@@ -477,43 +707,237 @@ const styles = StyleSheet.create({
   },
   streamRail: {
     position: "relative",
-    paddingVertical: 8,
+    paddingTop: 28,
+    paddingBottom: 12,
     paddingHorizontal: 4,
-    gap: 16,
+    gap: 28,
+  },
+  lensStack: {
+    paddingTop: 0,
+    paddingBottom: 14,
+    position: "relative",
+  },
+  lensItem: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    width: "100%",
+    alignSelf: "center",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 22,
+  },
+  lensExchange: {
+    width: "78%",
+    maxWidth: 680,
+    minHeight: 190,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  lensCard: {
+    width: "88%",
+    maxWidth: 680,
+    minHeight: 180,
+    borderRadius: 32,
+    paddingHorizontal: 24,
+    paddingVertical: 22,
+    borderWidth: 1,
+    borderColor: "rgba(139, 231, 255, 0.14)",
+    backgroundColor: "rgba(8, 12, 23, 0.58)",
+    shadowColor: "#70E5FF",
+    shadowOpacity: 0.08,
+    shadowRadius: 34,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  lensCardActive: {
+    borderColor: "rgba(139, 231, 255, 0.25)",
+    minHeight: 224,
+    backgroundImage:
+      "linear-gradient(135deg, rgba(14, 39, 61, 0.72), rgba(10, 14, 25, 0.88) 52%, rgba(34, 18, 50, 0.62))",
+    shadowOpacity: 0.16,
+  },
+  lensCardDormant: {
+    maxWidth: 560,
+    minHeight: 134,
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+    borderColor: "rgba(139, 231, 255, 0.08)",
+    backgroundColor: "rgba(8, 12, 23, 0.3)",
+  },
+  lensPromptPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    alignSelf: "center",
+    maxWidth: "76%",
+    paddingHorizontal: 22,
+    paddingVertical: 9,
+    borderRadius: 999,
+    backgroundColor: "rgba(35, 22, 50, 0.96)",
+    borderWidth: 1,
+    borderColor: "rgba(226, 143, 255, 0.18)",
+  },
+  lensKicker: {
+    color: "#A9B8D3",
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.8,
+    textTransform: "uppercase",
+    marginBottom: 0,
+  },
+  lensKickerActive: {
+    color: "#E8B9FF",
+  },
+  lensKickerCompanion: {
+    color: "#93EAFF",
+    marginBottom: 8,
+  },
+  lensStatus: {
+    color: "#7387AA",
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.5,
+    textTransform: "uppercase",
+    marginTop: 4,
+  },
+  lensQuestion: {
+    color: "#F1D9FF",
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  lensConnector: {
+    width: 1,
+    height: 22,
+    alignSelf: "center",
+    backgroundImage:
+      "linear-gradient(180deg, rgba(226, 143, 255, 0.34), rgba(139, 231, 255, 0.24), rgba(139, 231, 255, 0))",
+    opacity: 0.78,
+    shadowColor: "#8BE7FF",
+    shadowOpacity: 0.24,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  lensAnswerPanel: {
+    width: "92%",
+    alignSelf: "center",
+    minHeight: 104,
+    borderRadius: 26,
+    paddingHorizontal: 20,
+    paddingVertical: 17,
+    backgroundColor: "rgba(6, 11, 21, 0.95)",
+    borderWidth: 1,
+    borderColor: "rgba(139, 231, 255, 0.2)",
+    backgroundImage:
+      "linear-gradient(135deg, rgba(12, 28, 45, 0.4), rgba(7, 11, 20, 0.76) 68%, rgba(52, 30, 72, 0.16))",
+    shadowColor: "#70E5FF",
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  lensAnswer: {
+    color: "#F3F8FF",
+    fontSize: 16,
+    lineHeight: 23,
+    fontWeight: "500",
+    letterSpacing: -0.3,
+  },
+  lensFootnotes: {
+    position: "absolute",
+    left: 98,
+    bottom: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  lensFootnote: {
+    color: "#7F93B9",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1.5,
+    textTransform: "uppercase",
+  },
+  lensFootnoteDot: {
+    color: "#42526F",
+    fontSize: 10,
+  },
+  signalSpine: {
+    position: "absolute",
+    top: 0,
+    bottom: 18,
+    left: "50%",
+    width: 32,
+    marginLeft: -16,
+    backgroundImage:
+      "linear-gradient(180deg, rgba(132, 236, 255, 0), rgba(132, 236, 255, 0.1), rgba(226, 143, 255, 0.07), rgba(132, 236, 255, 0))",
   },
   storyRow: {
     position: "relative",
     width: "100%",
+    minHeight: 76,
   },
   storyRowAssistant: {
-    paddingRight: "20%",
+    paddingRight: "30%",
   },
   storyRowUser: {
     alignItems: "flex-end",
-    paddingLeft: "34%",
+    paddingLeft: "42%",
+  },
+  thoughtPin: {
+    position: "absolute",
+    top: 28,
+    left: "50%",
+    width: 9,
+    height: 9,
+    marginLeft: -4,
+    borderRadius: 999,
+    borderWidth: 1,
+    zIndex: 3,
+  },
+  thoughtPinAssistant: {
+    backgroundColor: "rgba(133, 234, 255, 0.22)",
+    borderColor: "rgba(133, 234, 255, 0.46)",
+    shadowColor: "#84ECFF",
+    shadowOpacity: 0.32,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  thoughtPinUser: {
+    backgroundColor: "rgba(222, 143, 255, 0.2)",
+    borderColor: "rgba(222, 143, 255, 0.42)",
+    shadowColor: "#DD8FFF",
+    shadowOpacity: 0.24,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 0 },
   },
   storyCard: {
-    minHeight: 72,
-    borderRadius: 22,
-    borderWidth: 1,
+    minHeight: 68,
+    borderRadius: 0,
+    borderWidth: 0,
+    position: "relative",
+    overflow: "visible",
   },
   storyCardAssistant: {
-    width: "84%",
+    width: "68%",
     alignSelf: "flex-start",
-    paddingHorizontal: 22,
-    paddingVertical: 18,
-    backgroundColor: "rgba(13, 20, 34, 0.82)",
-    backgroundImage:
-      "linear-gradient(135deg, rgba(25, 74, 103, 0.28) 0%, rgba(13, 20, 34, 0.82) 58%, rgba(10, 15, 27, 0.86) 100%)",
-    borderColor: "rgba(132, 236, 255, 0.18)",
+    paddingHorizontal: 28,
+    paddingVertical: 16,
+    borderLeftWidth: 1,
+    borderLeftColor: "rgba(132, 236, 255, 0.28)",
+    shadowColor: "#54D8FF",
+    shadowOpacity: 0.06,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 0 },
   },
   storyCardUser: {
-    width: "66%",
+    width: "48%",
     alignSelf: "flex-end",
-    paddingHorizontal: 18,
+    paddingHorizontal: 24,
     paddingVertical: 14,
-    backgroundColor: "rgba(20, 17, 32, 0.82)",
-    borderColor: "rgba(221, 160, 255, 0.2)",
+    borderRightWidth: 1,
+    borderRightColor: "rgba(221, 160, 255, 0.26)",
   },
   storyCardPending: {
     borderStyle: "dashed",
@@ -527,18 +951,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: 12,
-    marginBottom: 9,
-  },
-  storyMetaRight: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
+    marginBottom: 8,
   },
   storyRole: {
     color: "#A8B8D9",
-    fontSize: 11,
+    fontSize: 9,
     fontWeight: "700",
-    letterSpacing: 0.8,
+    letterSpacing: 1.8,
     textTransform: "uppercase",
   },
   storyRoleAssistant: {
@@ -547,25 +966,10 @@ const styles = StyleSheet.create({
   storyRoleUser: {
     color: "#E7B5FF",
   },
-  modeTag: {
-    width: 30,
-    height: 30,
-    borderRadius: 999,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-  },
-  modeTagVoice: {
-    backgroundColor: "rgba(58, 112, 163, 0.14)",
-    borderColor: "rgba(121, 217, 255, 0.18)",
-  },
-  modeTagText: {
-    backgroundColor: "rgba(103, 67, 148, 0.14)",
-    borderColor: "rgba(226, 150, 255, 0.14)",
-  },
   storyText: {
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 17,
+    lineHeight: 25,
+    fontWeight: "500",
   },
   storyTextAssistant: {
     color: "#EAF3FF",

@@ -285,7 +285,7 @@ export default function HomeScreen() {
 
   const heroHeight = modeProgress.interpolate({
     inputRange: [0, 1],
-    outputRange: [620, 128],
+    outputRange: [620, 72],
   });
 
   const orbScale = modeProgress.interpolate({
@@ -295,7 +295,7 @@ export default function HomeScreen() {
 
   const orbLift = modeProgress.interpolate({
     inputRange: [0, 1],
-    outputRange: [0, -355],
+    outputRange: [0, -540],
   });
 
   const captionOpacity = modeProgress.interpolate({
@@ -306,11 +306,6 @@ export default function HomeScreen() {
   const captionLift = modeProgress.interpolate({
     inputRange: [0, 1],
     outputRange: [0, -18],
-  });
-
-  const chatCanopyOpacity = modeProgress.interpolate({
-    inputRange: [0, 0.18, 1],
-    outputRange: [0, 0.78, 0.82],
   });
 
   const listeningRingScale = listeningPulse.interpolate({
@@ -421,16 +416,6 @@ export default function HomeScreen() {
             error={conversationError}
             onDraftChange={setComposerDraft}
             onSend={handleSendText}
-          />
-
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.chatCanopy,
-              {
-                opacity: chatCanopyOpacity,
-              },
-            ]}
           />
 
           <Animated.View
@@ -679,18 +664,6 @@ const styles = StyleSheet.create({
     marginTop: 0,
     position: "relative",
     zIndex: 41,
-  },
-  chatCanopy: {
-    position: "absolute",
-    top: -2,
-    left: 0,
-    right: 0,
-    height: 282,
-    zIndex: 34,
-    backgroundImage:
-      "radial-gradient(ellipse at 50% 6%, rgba(21, 38, 62, 0.92) 0%, rgba(12, 22, 38, 0.76) 32%, rgba(8, 11, 20, 0.3) 62%, rgba(8, 11, 20, 0.08) 78%, rgba(8, 11, 20, 0) 100%)",
-    borderBottomLeftRadius: 42,
-    borderBottomRightRadius: 42,
   },
   orbInsightDock: {
     position: "absolute",
