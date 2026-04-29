@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-from core.agent import get_agent
+from core.agent import format_for_voice_delivery, get_agent
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,7 @@ def register_websocket_routes(app: FastAPI) -> None:
                 if prefer_streaming_response:
                     await send_event({"type": "response_start", "turnId": turn_id})
                     sentence_buffer = ""
+                    streamed_audio_segments = 0
 
                     stream = (
                         agent.stream_input(
@@ -128,12 +129,17 @@ def register_websocket_routes(app: FastAPI) -> None:
                             )
                             completed, sentence_buffer = _drain_completed_sentences(sentence_buffer)
                             for sentence in completed:
-                                sentence_audio = await agent.voice.speak(sentence)
+                                spoken_sentence = format_for_voice_delivery(sentence)
+                                if not spoken_sentence:
+                                    continue
+                                sentence_audio = await agent.voice.speak(spoken_sentence)
+                                if sentence_audio:
+                                    streamed_audio_segments += 1
                                 await send_event(
                                     {
                                         "type": "response_sentence",
                                         "turnId": turn_id,
-                                        "text": sentence,
+                                        "text": spoken_sentence,
                                         "audio": sentence_audio,
                                         "audioMimeType": (
                                             agent.voice.output_mime_type if sentence_audio else None
@@ -143,26 +149,33 @@ def register_websocket_routes(app: FastAPI) -> None:
                             continue
 
                         if sentence_buffer.strip():
-                            sentence_audio = await agent.voice.speak(sentence_buffer.strip())
-                            await send_event(
-                                {
-                                    "type": "response_sentence",
-                                    "turnId": turn_id,
-                                    "text": sentence_buffer.strip(),
-                                    "audio": sentence_audio,
-                                    "audioMimeType": (
-                                        agent.voice.output_mime_type if sentence_audio else None
-                                    ),
-                                }
-                            )
+                            spoken_sentence = format_for_voice_delivery(sentence_buffer.strip())
+                            if spoken_sentence:
+                                sentence_audio = await agent.voice.speak(spoken_sentence)
+                                if sentence_audio:
+                                    streamed_audio_segments += 1
+                                await send_event(
+                                    {
+                                        "type": "response_sentence",
+                                        "turnId": turn_id,
+                                        "text": spoken_sentence,
+                                        "audio": sentence_audio,
+                                        "audioMimeType": (
+                                            agent.voice.output_mime_type if sentence_audio else None
+                                        ),
+                                    }
+                                )
                             sentence_buffer = ""
 
-                        final_audio = await agent.voice.speak(str(event["text"]))
+                        final_text = format_for_voice_delivery(str(event["text"]))
+                        final_audio = None
+                        if streamed_audio_segments == 0:
+                            final_audio = await agent.voice.speak(final_text)
                         await send_event(
                             {
                                 "type": "response_complete",
                                 "turnId": turn_id,
-                                "text": event["text"],
+                                "text": final_text,
                                 "audio": final_audio,
                                 "audioMimeType": (
                                     agent.voice.output_mime_type if final_audio else None

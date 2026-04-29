@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -21,6 +22,7 @@ class InsightCandidate:
     source_memory_ids: list[str]
     cooldown_hours: int = 24
     expires_after_hours: int = 72
+    metadata: dict[str, object] | None = None
 
 
 class ProactiveService:
@@ -89,8 +91,8 @@ class ProactiveService:
 
     async def latest_pending_insight(self, user_id: str) -> Optional[ProactiveInsight]:
         await self._expire_low_value_pending(user_id)
-        insights = await self.list_insights(user_id=user_id, status="pending", limit=1)
-        surfaceable = [insight for insight in insights if insight.importance >= MIN_SURFACE_IMPORTANCE]
+        insights = await self.list_insights(user_id=user_id, status="pending", limit=5)
+        surfaceable = [insight for insight in insights if self._is_surfaceable(insight)]
         return surfaceable[0] if surfaceable else None
 
     async def dismiss_insight(self, insight_id: str) -> Optional[ProactiveInsight]:
@@ -113,7 +115,12 @@ class ProactiveService:
         created = 0
 
         for candidate in candidates:
-            if candidate.importance < MIN_SURFACE_IMPORTANCE:
+            passed, quality = self._quality_gate(candidate)
+            candidate.metadata = {
+                **(candidate.metadata or {}),
+                "quality_gate": quality,
+            }
+            if not passed:
                 continue
             if await self._should_skip_candidate(user_id, candidate):
                 continue
@@ -328,10 +335,10 @@ class ProactiveService:
                         importance,
                         status,
                         source_memory_ids,
-                        metadata,
-                        expires_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, '{}'::jsonb, %s)
+                    metadata,
+                    expires_at
+                )
+                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s::jsonb, %s)
                     ON CONFLICT DO NOTHING
                     """,
                     (
@@ -342,6 +349,7 @@ class ProactiveService:
                         candidate.content,
                         candidate.importance,
                         candidate.source_memory_ids,
+                        self._json_dumps(candidate.metadata or {}),
                         expires_at,
                     ),
                 )
@@ -426,6 +434,37 @@ class ProactiveService:
             source_memory_ids=[str(item) for item in list(row["source_memory_ids"] or [])],
             metadata=dict(row["metadata"] or {}),
         )
+
+    def _quality_gate(self, candidate: InsightCandidate) -> tuple[bool, dict[str, object]]:
+        content_lower = candidate.content.lower()
+        title_lower = candidate.title.lower()
+        source_count = len(set(candidate.source_memory_ids))
+        checks = {
+            "important_enough": candidate.importance >= MIN_SURFACE_IMPORTANCE,
+            "has_evidence": source_count >= 2 or candidate.category == "goal",
+            "speaks_to_user": "you" in content_lower or "your" in content_lower or content_lower.startswith("i "),
+            "not_about_the_companion_in_third_person": "the companion" not in content_lower,
+            "not_generic_status": "calibrated" not in title_lower and "stable read" not in content_lower,
+            "short_enough_to_interrupt": len(candidate.content) <= 320,
+        }
+        score = sum(1 for passed in checks.values() if passed) / max(len(checks), 1)
+        return all(checks.values()), {
+            "passed": all(checks.values()),
+            "score": round(score, 3),
+            "checks": checks,
+            "source_count": source_count,
+        }
+
+    def _is_surfaceable(self, insight: ProactiveInsight) -> bool:
+        if insight.importance < MIN_SURFACE_IMPORTANCE:
+            return False
+        quality = insight.metadata.get("quality_gate") if insight.metadata else None
+        if isinstance(quality, dict) and quality.get("passed") is False:
+            return False
+        return True
+
+    def _json_dumps(self, value: dict[str, object]) -> str:
+        return json.dumps(value)
 
     def _strip_prefixes(self, text: str, *prefixes: str) -> str:
         stripped = text

@@ -30,3 +30,16 @@ async def internet_search(q: str) -> dict[str, object]:
         ],
     }
 
+
+@router.get("/internet/route")
+async def internet_route(q: str) -> dict[str, object]:
+    service = get_internet_tool_service()
+    route = service.route_for_turn(q)
+    return {
+        "should_search": route.should_search,
+        "provider": route.provider,
+        "provider_configured": route.provider_configured,
+        "reason": route.reason,
+        "categories": route.categories,
+        "high_stakes": route.high_stakes,
+    }

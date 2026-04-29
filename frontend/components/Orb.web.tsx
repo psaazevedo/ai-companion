@@ -325,6 +325,11 @@ function drawParticleOrb(
   state.smoothedMouseY = lerp(state.smoothedMouseY, state.targetMouseY, 0.14);
   const insightOpen = state.smoothedInsight * (1 - compactness);
   const hoverEnergy = state.smoothedHover * (1 - compactness);
+  const canvasCompactness = clamp((820 - Math.min(width, height)) / 360, 0, 1);
+  const particleRadiusScale = lerp(1, 0.68, canvasCompactness);
+  const particleAlphaScale = lerp(1, 0.78, canvasCompactness);
+  const sprayAlphaScale = lerp(1, 0.58, canvasCompactness);
+  const sprayRadiusScale = lerp(1, 0.72, canvasCompactness);
 
   ctx.clearRect(0, 0, width, height);
   ctx.save();
@@ -359,6 +364,8 @@ function drawParticleOrb(
     state.smoothedInput,
     compactness,
     hoverEnergy,
+    sprayAlphaScale,
+    sprayRadiusScale,
     sprayPoints
   );
 
@@ -446,12 +453,13 @@ function drawParticleOrb(
     let baseColor = getPointColor(rotatedX, rotatedY, depth);
     const edge = 1 - Math.abs(finalZ);
     const heroAlpha = clamp(0.16 + depth * 0.62 + edge * 0.12 + config.glow * 0.05, 0.14, 0.94);
-    const compactAlpha = clamp(0.08 + depth * 0.36 + edge * 0.08 + config.glow * 0.03, 0.07, 0.64);
+    const compactAlpha = clamp(0.13 + depth * 0.48 + edge * 0.1 + config.glow * 0.05, 0.1, 0.82);
     let alpha = lerp(heroAlpha, compactAlpha, compactness) * (1 + hoverEnergy * 0.22);
     const heroRadius = (0.8 + point.size * 1.35 + depth * 1.65) * projection;
     const compactRadius = (0.18 + point.size * 0.42 + depth * 0.62) * projection;
     let radius =
       lerp(heroRadius, compactRadius, compactness)
+      * particleRadiusScale
       * (1 + hoverEnergy * 0.16)
       * (0.9 + point.scatter * 0.22);
 
@@ -498,7 +506,7 @@ function drawParticleOrb(
 
   for (const point of projected) {
     ctx.beginPath();
-    ctx.fillStyle = rgba(point.color, point.alpha);
+    ctx.fillStyle = rgba(point.color, point.alpha * particleAlphaScale);
     ctx.arc(point.screenX, point.screenY, point.radius, 0, Math.PI * 2);
     ctx.fill();
   }
@@ -517,7 +525,7 @@ function drawAmbientGlow(
   compactness: number,
   hoverEnergy: number
 ) {
-  const energy = (config.glow + inputLevel * 0.26 + hoverEnergy * 0.22) * lerp(1, 0.52, compactness);
+  const energy = (config.glow + inputLevel * 0.26 + hoverEnergy * 0.22) * lerp(1, 0.76, compactness);
   const topGlow = ctx.createRadialGradient(
     centerX - sphereRadius * 0.34,
     centerY - sphereRadius * 0.42,
@@ -569,6 +577,8 @@ function drawSpray(
   inputLevel: number,
   compactness: number,
   hoverEnergy: number,
+  sprayAlphaScale: number,
+  sprayRadiusScale: number,
   sprayPoints: SprayPoint[]
 ) {
   const pulse = config.shellWave * sphereRadius * (0.55 + inputLevel * 1.15 + hoverEnergy * 0.45);
@@ -601,13 +611,14 @@ function drawSpray(
         0.1 + particle.noise * 0.34 + config.glow * 0.06,
         0.03 + particle.noise * 0.12 + config.glow * 0.03,
         compactness
-      ) * (1 + hoverEnergy * 0.42)
+      ) * (1 + hoverEnergy * 0.42) * sprayAlphaScale
     );
     ctx.arc(
       x,
       y,
       particle.size
-        * lerp(0.7 + config.spray, 0.34 + config.spray * 0.44, compactness),
+        * lerp(0.7 + config.spray, 0.34 + config.spray * 0.44, compactness)
+        * sprayRadiusScale,
       0,
       Math.PI * 2
     );

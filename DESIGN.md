@@ -1,8 +1,28 @@
 # Design Guidelines
 
-This product is a personal AI companion: voice-first, memory-rich, emotionally present, and inspectable. The interface should feel like one continuous relationship rather than a pile of screens. Design decisions should protect that feeling while making the system easier to understand, trust, and control.
+Universal design rules for this AI companion. Raw token values live in `TOKENS.md`. Reusable component patterns live in `COMPONENTS.md`.
 
-The current baseline is a dark, focused canvas with a living orb at the center, a compact voice/chat mode switch, an immersive conversation lens, and a Memory Atlas for transparency. Future design work should extend this language instead of replacing it.
+This product is voice-first, memory-rich, emotionally present, and inspectable. The interface should feel like one continuous relationship rather than a pile of screens. Design decisions should protect that feeling while making the system easier to understand, trust, and control.
+
+## How Codex Should Use This File
+
+For any user-facing UI, UX, copy, motion, interaction, or visual change, read in this order:
+
+1. `TOKENS.md` - raw colors, spacing, radius, type, and motion values.
+2. `DESIGN.md` - rules for how those values are used.
+3. `COMPONENTS.md` - existing component patterns and reuse expectations.
+4. The task prompt - what to build now.
+
+Use this prompt structure for design-facing work:
+
+1. Experience intent - what should the user feel or understand?
+2. Product context - voice, chat, memory, proactive insight, or settings.
+3. Existing pattern - which component or surface this extends.
+4. Global rules - spacing, color, type, motion, accessibility.
+5. Negative constraints - what must not happen.
+6. Component spec - states, transitions, edge cases, data states.
+
+Reuse before creating. If a component pattern exists in `COMPONENTS.md`, use it. If the need is close, extend that pattern and update `COMPONENTS.md`. Create a new pattern only when it is genuinely new.
 
 ## North Star
 
@@ -24,7 +44,7 @@ Avoid:
 - Generic AI copy that could belong to any assistant.
 - Interfaces that imply certainty, intimacy, urgency, or capability the system has not earned.
 
-## Existing Design Language
+## Current Product Language
 
 ### Product Shape
 
@@ -36,11 +56,11 @@ Avoid:
 
 ### Visual Tone
 
-- Base canvas: very dark blue-black, currently centered around `#080B14`.
+- Base canvas: very dark blue-black, centered around `#080B14`.
 - Primary light: cool cyan and soft blue for presence, listening, memory, and active system state.
 - Secondary light: violet/pink for user-side input and relational contrast.
-- Warm accent: amber/orange only for thinking, salience, or caution. Use sparingly.
-- Text: near-white for primary content, muted blue-gray for secondary text, never low-contrast haze.
+- Warm accent: amber/orange only for thinking, salience, caution, or transition.
+- Text: near-white for primary content, muted blue-gray for secondary text.
 - Surfaces: translucent, layered, and quiet. Use borders and shadow as separation tools, not ornament.
 
 ### Spatial Language
@@ -51,63 +71,189 @@ Avoid:
 - Use large empty areas intentionally around the orb and conversation focus. Empty space is part of the calm.
 - Avoid card-on-card layouts. Use cards for repeated items, flyouts, modals, or evidence blocks, not for every page section.
 
-### Motion
+## Motion
 
-- Motion should express state, attention, continuity, or response. It should not exist only because the screen can animate.
-- Orb motion may be organic and continuous, but control motion should be quick, predictable, and subtle.
-- Mode transitions should preserve spatial continuity: voice should collapse into chat rather than jump to a different world.
-- Loading and streaming states should show that the system is working without creating urgency.
-- Respect reduced-motion needs when that setting is available.
+Motion should express state, attention, continuity, or response. It should not exist only because the screen can animate.
 
-## Design Principles
+### Curves
 
-### UI Rationale
+| Situation | Curve | Use for |
+|---|---|---|
+| Entering element | `Easing.out(Easing.cubic)` or `cubic-bezier(0.22, 1, 0.36, 1)` | Element appears or settles |
+| Exiting element | `Easing.in(Easing.cubic)` or `cubic-bezier(0.55, 0, 1, 0.45)` | Element leaves |
+| Mode transition | `Easing.inOut(Easing.cubic)` | Voice/chat or panel transformation |
+| Idle loop | `Easing.inOut(Easing.sin)` or `ease-in-out` | Breathing, pulsing, ambient presence |
+| Weighted return | Spring with stiffness near `120-150`, damping near `18-24` | Focused cards, active lens items |
 
-- Every design detail must have a logical reason. UI choices should improve usability, clarity, trust, or consistency.
-- Prefer the option with lower usability risk. Small ambiguities compound into friction.
-- Reduce clicks, effort, movement, and thinking required to complete a task.
-- Remove unnecessary information, styles, and decisions.
-- Use one clearly dominant primary action.
-- Group related items tightly and separate unrelated items clearly.
-- Similar elements should look and behave in similar ways.
-- Prefer familiar patterns unless a better alternative is clearly justified.
-- Use concise, plain, front-loaded text.
-- Ensure sufficient contrast and avoid relying on color alone.
+Do not use generic "smooth" as a spec. Name duration and easing.
 
-### Gestalt
+### Durations
 
-- Proximity: related elements should be spatially grouped.
-- Similarity: elements with similar meaning should share visual treatment.
-- Continuity: layouts should guide the eye in a smooth, predictable path.
-- Figure-ground: important content must stand apart clearly from the background.
-- Alignment: elements should align to a clear visual structure.
-- Closure: related content should feel visually contained or complete.
+| Element type | Duration | Notes |
+|---|---:|---|
+| Hover, press, focus | `80-150ms` | Instant feel |
+| Small appear/fade | `180-250ms` | Single element |
+| Flyout or modal | `240-360ms` | Panel-level |
+| Atlas open/close | `420-520ms` | Large overlay |
+| Voice/chat mode shift | `620-720ms` | Major identity-preserving transition |
+| Proactive insight reveal | `900-1100ms` | Rare, ambient arrival |
+| Orb idle cycle | `3-8s` | Alive but not distracting |
 
-### Rams-Inspired Product Taste
+Exits should usually be 60-80% of the matching enter duration.
 
-- Useful: every element should support the user's task or understanding.
-- Unobtrusive: the interface should not call attention to itself without reason.
-- Honest: do not imply value, urgency, certainty, or capability the product does not provide.
-- Long-lasting: prefer durable patterns over trend-driven effects.
-- Thorough: details should feel considered, not arbitrary.
-- As little design as possible: remove anything that does not strengthen meaning or usability.
+### Stagger
 
-### Nielsen-Inspired Usability
+- When multiple elements enter together, delay each by `30-60ms`.
+- Cap item-by-item stagger at 5 items.
+- Beyond 5 items, stagger groups instead of every element.
 
-- Visibility of system status: show relevant states such as listening, thinking, speaking, reconnecting, loading, streaming, error, archived, active, and pinned.
-- Match the real world: use language familiar to the user, especially around memory, evidence, and recovery.
-- User control and freedom: allow dismissal, close, back out, undo, correction, and recovery where possible.
-- Consistency and standards: follow known interaction conventions unless there is a strong reason not to.
-- Error prevention: make destructive or high-impact actions hard to do accidentally.
-- Recognition over recall: make options visible instead of forcing the user to remember hidden gestures or modes.
-- Aesthetic and minimalist design: remove irrelevant information.
-- Help users recover: error messages should be specific, constructive, and calm.
+### Continuous Animation
+
+For orbs, pulses, breathing effects:
+
+- Cycle: `3-8s`.
+- Scale amplitude: `2-6%`.
+- Opacity amplitude: no more than `0.15-0.22`.
+- Pause or quiet down during direct user interaction when possible.
+- Continuous motion must communicate presence or state, not decoration.
+
+### Performance
+
+- Prefer animating `transform` and `opacity`.
+- Avoid animating `height`, `width`, `left`, `top`, `margin`, or layout-affecting values.
+- Use stable dimensions for fixed-format elements so motion does not cause layout shift.
+
+## Gestalt And Layout
+
+### Proximity
+
+Related elements should be spatially grouped.
+
+- Internal gap: `4-12px`.
+- Between related controls: `12-24px`.
+- Between groups: `24-48px`.
+- Between major sections: `48-80px`.
+
+Do not use borders or backgrounds to group what spacing already groups.
+
+### Similarity
+
+Elements with similar meaning should share visual treatment. If two elements look the same, they should behave the same. Never use similar styling for different functionality.
+
+### Continuity
+
+Layouts should guide the eye in a smooth, predictable path. Maintain a clear central axis in voice mode and a stable vertical rhythm in chat and Atlas surfaces.
+
+### Figure / Ground
+
+Important content must stand apart clearly from the background. Use contrast, scale, spacing, and placement before adding decoration.
+
+Minimum contrast:
+
+- Text: `4.5:1` where practical.
+- UI elements and focus indicators: `3:1`.
+
+### Closure
+
+Related content should feel visually complete. Use cards or flyouts only when content is a distinct object, inspection surface, modal, or repeated record.
+
+### Common Fate
+
+Elements moving together are perceived as a unit. Synchronize motion for grouped controls and stagger only when revealing separate items.
+
+## Space Over Boxes
+
+Space is the default container. A box is justified only when content is a distinct object or needs functional elevation.
+
+Use a container for:
+
+- Message or conversation object.
+- Evidence, memory, or timeline record.
+- Modal, flyout, overlay, or composer.
+- Interactive control cluster.
+- Alert, error, or proactive insight.
+
+Avoid a container for:
+
+- Text-only page sections.
+- Small label/value groups that spacing can handle.
+- Decorative grouping.
+- Every section on a screen.
+- A card inside another card.
+
+When separation is needed, prefer:
+
+- More whitespace.
+- Stronger type hierarchy.
+- Shared alignment.
+- Subtle background tone shift.
+- A single hairline separator as a last resort.
+
+## Typography And Copy
+
+### Type Scale
+
+Use the current React Native/system stack unless a deliberate brand typography decision is made. Do not introduce a new font family casually.
+
+| Role | Size | Weight | Line height | Use |
+|---|---:|---:|---:|---|
+| Display | `28-40` | `700-800` | `1.1-1.2` | Atlas headers, rare hero-like moments |
+| H1/H2 | `22-28` | `600-800` | `1.15-1.25` | Surface titles |
+| H3 | `18-20` | `600-700` | `1.25-1.35` | Section titles, empty states |
+| Body | `14-16` | `400-500` | `1.45-1.65` | Readable content |
+| Dense body | `12-14` | `400-600` | `1.35-1.5` | Metadata-heavy surfaces |
+| Caption/label | `11-13` | `500-700` | `1.25-1.4` | Labels, chips, helper text |
+| Eyebrow | `10-12` | `700-800` | `1.2` | Sparse uppercase metadata |
+
+### Type Rules
+
+- Use no more than 3 primary font sizes on a single compact surface.
+- Use weight and color for secondary emphasis before adding more sizes.
+- Body and small text should not use negative letter spacing.
+- Uppercase belongs to compact labels, not paragraphs or primary actions.
+- Center-align only short, centered voice-mode content. Left-align dense reading and Atlas inspection.
+- Keep body line length roughly `45-75` characters where layout allows.
+
+### Copy Rules
+
+- Copy should be concise, specific, and front-loaded.
+- Prefer plain words over brand mood.
+- Do not over-explain features inside the active product surface. Put deeper explanations in inspection, help, or empty states.
+- Never imply the companion knows more than the data supports.
+- Avoid generic AI language such as "unlock your potential", "supercharge", "seamless", or "personalized experience" unless the surrounding sentence makes it concrete.
+
+Good:
+
+- "What I remember, how strongly, and why."
+- "Select a memory to inspect it."
+- "Distilled from repeated reinforcement rather than one clear episode."
+
+Weak:
+
+- "Your intelligent AI memory hub."
+- "Unlock deeper insights from your personalized companion."
+- "Everything you need, all in one place."
+
+## Color And Contrast
+
+Use color roles from `TOKENS.md`. Do not invent new color roles without updating that file.
+
+- `bg.base` is the stable app canvas.
+- `presence.cyan` and `presence.blue` communicate companion state, listening, memory, and active system status.
+- `user.violet` and `user.pink` communicate user-side input or relational contrast.
+- `state.thinking` communicates thinking, salience, or caution.
+- `state.error` is only for actual errors.
+- Text colors must stay readable on translucent dark surfaces.
+- Do not rely on color alone for status. Pair color with labels, icons, shape, opacity, or placement.
+- One accent should dominate a single control group. Do not make every element glow.
+
+The orb is allowed to use glow, particles, and living light because it is the companion's presence surface. Other UI should use glow sparingly and functionally.
 
 ## Product-Specific Rules
 
 ### Voice Mode
 
-- The orb should remain the hero of voice mode.
+- The orb remains the hero.
 - The microphone action should be immediately available and visually distinct.
 - The user should always understand whether the companion is listening, thinking, speaking, reconnecting, or idle.
 - Do not place explanatory onboarding text in the center experience unless the user is blocked.
@@ -126,7 +272,7 @@ Avoid:
 - The Atlas should make memory inspectable, not merely decorative.
 - Always connect memory claims to confidence, strength, status, source, or relationship when available.
 - Use group color consistently: goals, projects, preferences, procedures, patterns, identity, and concepts should keep stable visual identities.
-- Archived, pinned, active, and outdated memories must be visually and textually distinguishable.
+- Archived, pinned, active, outdated, and superseded memories must be visually and textually distinguishable.
 - Evidence should be easy to scan before it is detailed.
 - Memory UI must be honest about uncertainty. Do not make inferred beliefs feel like facts.
 
@@ -139,56 +285,18 @@ Avoid:
 
 ## Components And Controls
 
-- Use icon buttons for compact actions when the icon is familiar: microphone, send, close, refresh, atlas.
-- Use text labels when the action is unfamiliar, high-stakes, or benefits from explicit wording.
-- Use segmented controls for mutually exclusive modes, as in voice/chat.
-- Use tabs for alternate views within a single surface, as in map/timeline/patterns.
+- Prefer named TSX components over large inline JSX blocks. Product screens should compose components and own orchestration, not bury full controls directly in the screen file.
+- Extract a component when a UI element has independent visual states, accessibility labels, motion, substantial styles, repeated structure, or a reusable product role.
+- Small one-off layout wrappers can stay inline when extraction would add indirection without reuse, state isolation, or clarity.
+- Use icon buttons for familiar compact actions: microphone, send, close, refresh, atlas.
+- Use text labels when the action is unfamiliar, high-stakes, destructive, or benefits from explicit wording.
+- Use segmented controls for mutually exclusive modes.
+- Use tabs for alternate views within a single surface.
 - Use chips for compact metadata, statuses, counts, and categories.
 - Use flyouts for focused inspection when the user needs context without leaving the current surface.
 - Primary action should have one dominant treatment. Secondary actions should be visually quieter.
-- Keep touch targets at least 44 by 44 px where possible.
+- Keep touch targets at least `44x44px` where possible.
 - Controls must have accessible labels when the visible UI is icon-only.
-
-## Typography And Copy
-
-- Copy should be concise, specific, and front-loaded.
-- Prefer plain words over brand mood.
-- Avoid generic AI language such as "unlock your potential", "supercharge", "seamless", or "personalized experience" unless the surrounding sentence makes it concrete.
-- Use sentence case for most interface copy.
-- Use uppercase sparingly for small labels, metadata, and compact status text.
-- Do not over-explain features inside the active product surface. Put deeper explanations in inspection, help, or empty states.
-- Never imply the companion knows more than the data supports.
-
-Good:
-
-- "What I remember, how strongly, and why."
-- "Select a memory to inspect it."
-- "Distilled from repeated reinforcement rather than one clear episode."
-
-Weak:
-
-- "Your intelligent AI memory hub."
-- "Unlock deeper insights from your personalized companion."
-- "Everything you need, all in one place."
-
-## Color And Contrast
-
-- Keep the dark canvas stable across screens.
-- Cyan/blue should primarily communicate companion presence, memory, active system state, and successful connection.
-- Violet/pink should primarily communicate user-side input, contrast, or relationship.
-- Amber/orange should primarily communicate thinking, caution, salience, or transition.
-- Use red/pink error tones only for actual errors.
-- Do not rely on color alone for status. Pair color with labels, icons, shape, opacity, or placement.
-- Check contrast for all text, especially muted labels on translucent dark surfaces.
-
-## Layout And Spacing
-
-- Favor a clear central axis for the primary experience.
-- Use stable dimensions for fixed-format UI such as the orb, mode toggle, microphone button, lens items, composer, and atlas controls.
-- Maintain consistent spacing within groups and larger spacing between groups.
-- Avoid nested cards and excessive panels.
-- Do not let text overlap controls, decorative fields, or other text at mobile or desktop sizes.
-- Keep dense operational UI restrained and scannable rather than hero-like.
 
 ## Interaction Cost
 
@@ -208,6 +316,23 @@ Weak:
 - Calm over excitement when the interface is presenting system intelligence.
 - Trust over persuasion in memory, identity, mental-state, or personal-history surfaces.
 
+## Negative Constraints
+
+Never:
+
+- Add multiple equal-weight primary actions.
+- Add a card or bordered wrapper around every section.
+- Nest cards inside cards.
+- Use glow, blur, particles, or gradients on ordinary controls without a state reason.
+- Use color as the only status indicator.
+- Animate layout properties when transform/opacity can do the job.
+- Use continuous animations faster than a `3s` cycle.
+- Use generic AI marketing copy.
+- Hide important controls behind gestures.
+- Show disabled controls without context when the reason is not obvious.
+- Add memory claims without evidence, confidence, or qualifying language when such metadata is available.
+- Make destructive or privacy-sensitive memory actions look casual.
+
 ## Transformation Playbook
 
 - Multiple equal-weight CTAs: choose one primary action and demote the rest.
@@ -215,7 +340,7 @@ Weak:
 - Messy layout: strengthen alignment, unify spacing, and normalize component treatments.
 - Generic copy: rewrite the headline and support text to be concrete and front-loaded.
 - Hard form: reduce field count, stack fields in one column, put labels above inputs, and replace dropdowns when a better control exists.
-- Trendy but weak style: remove decorative effects that reduce contrast, hierarchy, or long-term durability.
+- Trendy but weak style: remove decorative effects that reduce contrast, hierarchy, or durability.
 - Disconnected information: tighten grouping and establish clearer container logic.
 - Lost primary content: increase contrast, scale, spacing, or placement around the primary message/action.
 - Destructive action too easy: reduce prominence, separate placement, and add confirmation or undo.
@@ -234,6 +359,8 @@ Before shipping a UI change, ask:
 - Are similar elements visually and behaviorally consistent?
 - Does the UI work without relying on color alone?
 - Are touch targets, contrast, focus, and labels accessible?
+- Does motion communicate state, attention, continuity, or response?
+- Does the change reuse or extend existing component patterns?
 - Does the change preserve the companion's calm, voice-first, memory-transparent identity?
 
 If the answer to any of these is weak, revise before adding more design.

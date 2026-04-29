@@ -8,6 +8,7 @@ import {
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
 } from "react-native";
 import { RefreshCw, X } from "lucide-react-native";
 
@@ -69,13 +70,16 @@ const GROUP_COLORS: Record<string, string> = {
 export function MemoryInspector({
   userId,
   visible,
+  onClose,
   progress,
 }: MemoryInspectorProps) {
   const { snapshot, isLoading, error, refresh } = useMemoryAtlas(userId, visible);
+  const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const [tab, setTab] = useState<AtlasTab>("map");
   const [selectedNodeId, setSelectedNodeId] = useState<string>("user");
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const flyoutProgress = useRef(new Animated.Value(0)).current;
+  const compactAtlas = viewportWidth < 860 || viewportHeight < 720;
 
   const visibleNodes = useMemo(() => {
     if (!snapshot) {
@@ -131,6 +135,13 @@ export function MemoryInspector({
   const selectedNode =
     visibleNodes.find((node) => node.id === selectedNodeId) ?? visibleNodes[0] ?? null;
   const evidence = selectedNode ? snapshot?.evidence[selectedNode.id] ?? [] : [];
+  const activeGroups = useMemo(
+    () =>
+      GROUP_ORDER.filter((group) =>
+        visibleNodes.some((node) => node.group === group && node.id !== "user")
+      ),
+    [visibleNodes]
+  );
   const handleSelectNode = (nodeId: string) => {
     setSelectedNodeId(nodeId);
     if (nodeId !== "user") {
@@ -168,10 +179,10 @@ export function MemoryInspector({
     : null;
 
   return (
-    <Animated.View style={[styles.panel, entranceStyle]}>
+    <Animated.View style={[styles.panel, compactAtlas ? styles.panelCompact : null, entranceStyle]}>
       <View style={styles.header}>
         <View style={styles.headerCopy}>
-          <Text style={styles.eyebrow}>Atlas</Text>
+          <Text style={styles.eyebrow}>Memory Atlas</Text>
           <Text style={styles.subtitle}>What I remember, how strongly, and why.</Text>
         </View>
         <View style={styles.headerActions}>
@@ -182,6 +193,14 @@ export function MemoryInspector({
             style={styles.headerButton}
           >
             <RefreshCw size={16} color="#DFF8FF" strokeWidth={2} />
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Close memory atlas"
+            onPress={onClose}
+            style={styles.headerButton}
+          >
+            <X size={17} color="#DFF8FF" strokeWidth={2.1} />
           </Pressable>
         </View>
       </View>
@@ -209,6 +228,14 @@ export function MemoryInspector({
         </View>
       </View>
 
+      {snapshot ? (
+        <View style={styles.statusRail}>
+          <Text style={styles.statusRailText}>
+            Showing the strongest inspectable memories. Updated {formatGeneratedAt(snapshot.generated_at)}.
+          </Text>
+        </View>
+      ) : null}
+
       {isLoading ? (
         <View style={styles.stateCard}>
           <ActivityIndicator color="#8DE1FF" />
@@ -229,8 +256,23 @@ export function MemoryInspector({
           showsVerticalScrollIndicator={false}
         >
           {tab === "map" ? (
-            <View style={styles.mapWorkspace}>
+            <View style={[styles.mapWorkspace, compactAtlas ? styles.mapWorkspaceCompact : null]}>
               <View style={styles.mapStage}>
+                {activeGroups.length ? (
+                  <View pointerEvents="none" style={styles.mapLegend}>
+                    {activeGroups.slice(0, 5).map((group) => (
+                      <View key={group} style={styles.legendItem}>
+                        <View
+                          style={[
+                            styles.legendDot,
+                            { backgroundColor: colorForGroup(group) },
+                          ]}
+                        />
+                        <Text style={styles.legendText}>{titleCase(group)}</Text>
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
                 <AtlasMap
                   nodes={layoutNodes}
                   edges={snapshot.map.edges}
@@ -249,6 +291,7 @@ export function MemoryInspector({
                   pointerEvents={inspectorOpen ? "auto" : "none"}
                   style={[
                     styles.detailFlyout,
+                    compactAtlas ? styles.detailFlyoutCompact : null,
                     flyoutStyle,
                   ]}
                 >
@@ -350,24 +393,31 @@ export function MemoryInspector({
 
           {tab === "timeline" ? (
             <View style={styles.timelineStack}>
-              {snapshot.timeline.map((entry) => (
-                <View key={entry.id} style={styles.timelineCard}>
-                  <View style={styles.timelineHeader}>
-                    <Text style={styles.timelineTitle}>{entry.title}</Text>
-                    <Text style={styles.timelineDate}>{formatDate(entry.timestamp)}</Text>
+              {snapshot.timeline.length ? (
+                snapshot.timeline.map((entry) => (
+                  <View key={entry.id} style={styles.timelineCard}>
+                    <View style={styles.timelineHeader}>
+                      <Text style={styles.timelineTitle}>{entry.title}</Text>
+                      <Text style={styles.timelineDate}>{formatDate(entry.timestamp)}</Text>
+                    </View>
+                    <View style={styles.timelineMeta}>
+                      <Text style={styles.timelineTone}>{titleCase(entry.emotional_tone)}</Text>
+                      <Text style={styles.timelineSalience}>
+                        Salience {Math.round(entry.salience * 100)}%
+                      </Text>
+                      <Text style={styles.timelineSalience}>
+                        {titleCase(entry.memory_status)}
+                      </Text>
+                    </View>
+                    <Text style={styles.timelineSummary}>{entry.summary}</Text>
                   </View>
-                  <View style={styles.timelineMeta}>
-                    <Text style={styles.timelineTone}>{titleCase(entry.emotional_tone)}</Text>
-                    <Text style={styles.timelineSalience}>
-                      Salience {Math.round(entry.salience * 100)}%
-                    </Text>
-                    <Text style={styles.timelineSalience}>
-                      {titleCase(entry.memory_status)}
-                    </Text>
-                  </View>
-                  <Text style={styles.timelineSummary}>{entry.summary}</Text>
-                </View>
-              ))}
+                ))
+              ) : (
+                <EmptyAtlasState
+                  title="No episodes yet"
+                  body="The Atlas will show remembered moments after a conversation has enough signal to store."
+                />
+              )}
             </View>
           ) : null}
 
@@ -753,11 +803,36 @@ function formatDate(value: string | null) {
   }).format(date);
 }
 
+function formatGeneratedAt(value: string | null) {
+  if (!value) {
+    return "just now";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) {
+    return "just now";
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
 function cleanEvidenceSummary(value: string) {
   return value
     .replace(/^User said:\s*/i, "")
     .replace(/\s*Agent replied:.*$/i, "")
     .trim();
+}
+
+function EmptyAtlasState({ title, body }: { title: string; body: string }) {
+  return (
+    <View style={styles.emptyState}>
+      <Text style={styles.emptyStateTitle}>{title}</Text>
+      <Text style={styles.emptyStateBody}>{body}</Text>
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -769,6 +844,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 42,
     paddingTop: 78,
     paddingBottom: 22,
+  },
+  panelCompact: {
+    paddingHorizontal: 16,
+    paddingTop: 62,
+    paddingBottom: 14,
   },
   header: {
     flexDirection: "row",
@@ -785,10 +865,9 @@ const styles = StyleSheet.create({
   },
   eyebrow: {
     color: "#F4F8FF",
-    fontSize: 28,
-    lineHeight: 34,
-    letterSpacing: -0.8,
-    textTransform: "uppercase",
+    fontSize: 30,
+    lineHeight: 36,
+    letterSpacing: 0,
     fontWeight: "800",
   },
   subtitle: {
@@ -801,8 +880,8 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   headerButton: {
-    width: 38,
-    height: 38,
+    width: 44,
+    height: 44,
     borderRadius: 999,
     backgroundColor: "rgba(17, 26, 43, 0.64)",
     borderWidth: 1,
@@ -824,7 +903,7 @@ const styles = StyleSheet.create({
   summaryRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 14,
+    gap: 12,
     alignItems: "center",
   },
   summaryChip: {
@@ -855,9 +934,11 @@ const styles = StyleSheet.create({
   },
   tabButton: {
     paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderRadius: 999,
     backgroundColor: "transparent",
+    minHeight: 36,
+    justifyContent: "center",
   },
   tabButtonActive: {
     backgroundColor: "rgba(223, 248, 255, 0.92)",
@@ -869,6 +950,17 @@ const styles = StyleSheet.create({
   },
   tabLabelActive: {
     color: "#09101D",
+  },
+  statusRail: {
+    width: "100%",
+    maxWidth: 1240,
+    alignSelf: "center",
+    marginTop: 12,
+  },
+  statusRailText: {
+    color: "#7488B0",
+    fontSize: 12,
+    lineHeight: 17,
   },
   stateCard: {
     marginTop: 20,
@@ -903,9 +995,13 @@ const styles = StyleSheet.create({
     position: "relative",
     minHeight: 620,
   },
+  mapWorkspaceCompact: {
+    minHeight: 0,
+    gap: 16,
+  },
   mapStage: {
     width: "100%",
-    borderRadius: 34,
+    borderRadius: 24,
     overflow: "hidden",
     backgroundColor: "rgba(10, 16, 29, 0.38)",
     shadowColor: "#7FDBFF",
@@ -915,8 +1011,38 @@ const styles = StyleSheet.create({
   },
   mapSvg: {
     width: "100%",
-    minHeight: 610,
+    minHeight: 520,
     aspectRatio: 1.58,
+  },
+  mapLegend: {
+    position: "absolute",
+    top: 18,
+    left: 18,
+    zIndex: 2,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    maxWidth: "72%",
+    padding: 8,
+    borderRadius: 999,
+    backgroundColor: "rgba(8, 13, 25, 0.54)",
+    borderWidth: 1,
+    borderColor: "rgba(146, 229, 255, 0.1)",
+  },
+  legendItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  legendDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 999,
+  },
+  legendText: {
+    color: "#AFC0E8",
+    fontSize: 11,
+    fontWeight: "600",
   },
   mapHint: {
     position: "absolute",
@@ -951,6 +1077,14 @@ const styles = StyleSheet.create({
     shadowRadius: 40,
     shadowOffset: { width: 0, height: 0 },
   },
+  detailFlyoutCompact: {
+    position: "relative",
+    top: "auto",
+    right: "auto",
+    bottom: "auto",
+    width: "100%",
+    borderRadius: 24,
+  },
   detailHeader: {
     gap: 14,
     paddingBottom: 18,
@@ -978,15 +1112,15 @@ const styles = StyleSheet.create({
     color: "#8CEBFF",
     fontSize: 11,
     textTransform: "uppercase",
-    letterSpacing: 1.8,
+    letterSpacing: 0.8,
     fontWeight: "700",
   },
   detailTitle: {
     color: "#F4F7FF",
-    fontSize: 30,
-    lineHeight: 34,
+    fontSize: 26,
+    lineHeight: 31,
     fontWeight: "800",
-    letterSpacing: -0.8,
+    letterSpacing: 0,
   },
   statusPills: {
     flexDirection: "row",
@@ -1001,7 +1135,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     fontSize: 11,
     fontWeight: "700",
-    letterSpacing: 0.9,
+    letterSpacing: 0.5,
     textTransform: "uppercase",
   },
   detailBody: {
@@ -1067,7 +1201,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     textTransform: "uppercase",
-    letterSpacing: 1.1,
+    letterSpacing: 0.6,
   },
   evidenceTime: {
     color: "#8BA2D5",
@@ -1136,7 +1270,7 @@ const styles = StyleSheet.create({
     color: "#9FF3CE",
     fontSize: 12,
     textTransform: "uppercase",
-    letterSpacing: 1.1,
+    letterSpacing: 0.6,
     fontWeight: "700",
   },
   timelineSalience: {
@@ -1180,5 +1314,27 @@ const styles = StyleSheet.create({
     color: "#D1DCF2",
     fontSize: 14,
     lineHeight: 20,
+  },
+  emptyState: {
+    minHeight: 180,
+    borderRadius: 24,
+    backgroundColor: "rgba(14, 20, 35, 0.62)",
+    borderWidth: 1,
+    borderColor: "rgba(129, 152, 201, 0.12)",
+    justifyContent: "center",
+    padding: 24,
+    gap: 8,
+  },
+  emptyStateTitle: {
+    color: "#F4F8FF",
+    fontSize: 18,
+    lineHeight: 24,
+    fontWeight: "700",
+  },
+  emptyStateBody: {
+    color: "#93A5CA",
+    fontSize: 14,
+    lineHeight: 20,
+    maxWidth: 520,
   },
 });

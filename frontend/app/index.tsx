@@ -1,25 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Mic,
-  UserRound,
-  X,
-} from "lucide-react-native";
-import {
   Animated,
   Easing,
   Platform,
-  Pressable,
   SafeAreaView,
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
 } from "react-native";
 
+import { AtlasToggle } from "@/components/AtlasToggle";
 import { ConversationSheet } from "@/components/ConversationSheet";
 import { MemoryInspector } from "@/components/MemoryInspector";
 import { ModeToggle } from "@/components/ModeToggle";
 import { Notification } from "@/components/Notification";
 import { Orb } from "@/components/Orb";
+import {
+  VoiceActionButton,
+  VoiceActionButtonSpacer,
+} from "@/components/VoiceActionButton";
 import { useConversationFeed } from "@/hooks/useConversationFeed";
 import { useAgent } from "@/hooks/useAgent";
 import { useProactiveInsight } from "@/hooks/useProactiveInsight";
@@ -32,6 +32,8 @@ const PREVIEW_INSIGHT = {
 
 export default function HomeScreen() {
   const isWeb = Platform.OS === "web";
+  const { height: viewportHeight, width: viewportWidth } = useWindowDimensions();
+  const compactViewport = viewportWidth < 720 || viewportHeight < 760;
   const [atlasOpen, setAtlasOpen] = useState(false);
   const [chatModeOpen, setChatModeOpen] = useState(false);
   const [orbModeProgress, setOrbModeProgress] = useState(0);
@@ -283,19 +285,24 @@ export default function HomeScreen() {
     [chatModeOpen]
   );
 
+  const voiceHeroHeight = Math.min(620, Math.max(compactViewport ? 360 : 420, viewportHeight * 0.58));
+  const chatHeroHeight = compactViewport ? 156 : 164;
+  const chatOrbTargetY = compactViewport ? 132 : 124;
+  const chatOrbLift = -Math.max(0, viewportHeight * 0.5 - chatOrbTargetY);
+
   const heroHeight = modeProgress.interpolate({
     inputRange: [0, 1],
-    outputRange: [620, 72],
+    outputRange: [voiceHeroHeight, chatHeroHeight],
   });
 
   const orbScale = modeProgress.interpolate({
     inputRange: [0, 0.52, 1],
-    outputRange: [1, 0.46, 0.18],
+    outputRange: [1, 0.48, compactViewport ? 0.32 : 0.24],
   });
 
   const orbLift = modeProgress.interpolate({
     inputRange: [0, 1],
-    outputRange: [0, -540],
+    outputRange: [0, chatOrbLift],
   });
 
   const captionOpacity = modeProgress.interpolate({
@@ -306,36 +313,6 @@ export default function HomeScreen() {
   const captionLift = modeProgress.interpolate({
     inputRange: [0, 1],
     outputRange: [0, -18],
-  });
-
-  const listeningRingScale = listeningPulse.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.96, 1.06],
-  });
-
-  const listeningRingOpacity = listeningPulse.interpolate({
-    inputRange: [0, 0.5, 1],
-    outputRange: [isListening ? 0.82 : 0, 0.95, 0.78],
-  });
-
-  const atlasIconOpacity = atlasProgress.interpolate({
-    inputRange: [0, 0.42, 1],
-    outputRange: [1, 0, 0],
-  });
-
-  const atlasCloseOpacity = atlasProgress.interpolate({
-    inputRange: [0, 0.48, 1],
-    outputRange: [0, 0, 1],
-  });
-
-  const atlasIconRotate = atlasProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["0deg", "-90deg"],
-  });
-
-  const atlasCloseRotate = atlasProgress.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["90deg", "0deg"],
   });
 
   return (
@@ -384,22 +361,39 @@ export default function HomeScreen() {
                 insightOpen={insightAnimationActive}
               />
             </Animated.View>
+          </Animated.View>
+
+          {responsePreview && !isListening && !chatModeOpen ? (
             <Animated.View
+              pointerEvents="none"
               style={[
-                styles.captionStack,
+                styles.responsePreviewDock,
+                compactViewport ? styles.responsePreviewDockCompact : null,
                 {
                   opacity: captionOpacity,
                   transform: [{ translateY: captionLift }],
                 },
               ]}
             >
-              {responsePreview && !isListening ? (
-                <Text style={styles.responsePreview} numberOfLines={4}>
-                  {responsePreview}
-                </Text>
-              ) : null}
+              <Text style={styles.responsePreview} numberOfLines={3}>
+                {responsePreview}
+              </Text>
             </Animated.View>
-          </Animated.View>
+          ) : null}
+
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.chatTopCanopy,
+              compactViewport ? styles.chatTopCanopyCompact : null,
+              {
+                opacity: modeProgress.interpolate({
+                  inputRange: [0, 0.36, 1],
+                  outputRange: [0, 0.48, 1],
+                }),
+              },
+            ]}
+          />
 
           <ConversationSheet
             visible={chatModeOpen}
@@ -418,106 +412,18 @@ export default function HomeScreen() {
             onSend={handleSendText}
           />
 
-          <Animated.View
-            style={[
-              styles.footer,
-              {
-              },
-            ]}
-          >
+          <Animated.View style={styles.footer}>
             <View style={styles.actionStack}>
               {!chatModeOpen ? (
-                <Animated.View
-                  style={[
-                    styles.speakButtonWrap,
-                    {
-                      opacity: modeProgress.interpolate({
-                        inputRange: [0, 0.55, 1],
-                        outputRange: [1, 0.12, 0],
-                      }),
-                      transform: [
-                        {
-                          translateY: modeProgress.interpolate({
-                            inputRange: [0, 1],
-                            outputRange: [0, 14],
-                          }),
-                        },
-                      ],
-                    },
-                  ]}
-                >
-                  <Pressable
-                    accessibilityLabel="Hold to speak"
-                    onPressIn={startListening}
-                    onPressOut={stopListening}
-                    style={({ pressed }) => [
-                      styles.speakButton,
-                      pressed ? styles.speakButtonPressed : null,
-                      isListening ? styles.speakButtonListening : null,
-                    ]}
-                  >
-                    <Animated.View
-                      pointerEvents="none"
-                      style={[
-                        styles.speakButtonRing,
-                        styles.speakButtonRingOuter,
-                        {
-                          opacity: listeningRingOpacity,
-                          transform: [{ scale: listeningRingScale }],
-                        },
-                      ]}
-                    />
-                    <Animated.View
-                      pointerEvents="none"
-                      style={[
-                        styles.speakButtonRing,
-                        styles.speakButtonRingThird,
-                        {
-                          opacity: listeningRingOpacity,
-                          transform: [{ scale: listeningRingScale }],
-                        },
-                      ]}
-                    />
-                    <Animated.View
-                      pointerEvents="none"
-                      style={[
-                        styles.speakButtonRing,
-                        styles.speakButtonRingSecond,
-                        {
-                          opacity: listeningRingOpacity,
-                          transform: [{ scale: listeningRingScale }],
-                        },
-                      ]}
-                    />
-                    <Animated.View
-                      pointerEvents="none"
-                      style={[
-                        styles.speakButtonRing,
-                        styles.speakButtonRingFirst,
-                        {
-                          opacity: listeningRingOpacity,
-                          transform: [{ scale: listeningRingScale }],
-                        },
-                      ]}
-                    />
-                    <Animated.View
-                      pointerEvents="none"
-                      style={[
-                        styles.speakButtonInnerGlow,
-                        {
-                          opacity: isListening ? 1 : 0,
-                        },
-                      ]}
-                    />
-                    <Mic
-                      size={23}
-                      color={isListening ? "#8DEEFF" : "#EAF4FF"}
-                      strokeWidth={2.2}
-                    />
-                  </Pressable>
-                </Animated.View>
+                <VoiceActionButton
+                  isListening={isListening}
+                  listeningPulse={listeningPulse}
+                  modeProgress={modeProgress}
+                  onPressIn={startListening}
+                  onPressOut={stopListening}
+                />
               ) : (
-                <View style={styles.speakButtonSpacer} />
+                <VoiceActionButtonSpacer />
               )}
               <ModeToggle
                 mode={chatModeOpen ? "chat" : "voice"}
@@ -537,44 +443,11 @@ export default function HomeScreen() {
         ) : null}
 
         {isWeb ? (
-          <View pointerEvents="box-none" style={styles.atlasToggleDock}>
-            <Pressable
-              onPress={() => setAtlasOpen((current) => !current)}
-              accessibilityRole="button"
-              accessibilityLabel={atlasOpen ? "Close memory atlas" : "Open memory atlas"}
-              hitSlop={10}
-              style={[
-                styles.atlasToggle,
-                atlasOpen ? styles.atlasToggleOpen : null,
-                isWeb ? ({ outlineStyle: "none", outlineWidth: 0 } as never) : null,
-              ]}
-            >
-              <Animated.View
-                pointerEvents="none"
-                style={[
-                  styles.atlasToggleIconLayer,
-                  {
-                    opacity: atlasIconOpacity,
-                    transform: [{ rotate: atlasIconRotate }],
-                  },
-                ]}
-              >
-                <UserRound size={20} color="#DFF8FF" strokeWidth={2.15} />
-              </Animated.View>
-              <Animated.View
-                pointerEvents="none"
-                style={[
-                  styles.atlasToggleIconLayer,
-                  {
-                    opacity: atlasCloseOpacity,
-                    transform: [{ rotate: atlasCloseRotate }],
-                  },
-                ]}
-              >
-                <X size={22} color="#F4F8FF" strokeWidth={2.25} />
-              </Animated.View>
-            </Pressable>
-          </View>
+          <AtlasToggle
+            isOpen={atlasOpen}
+            progress={atlasProgress}
+            onToggle={() => setAtlasOpen((current) => !current)}
+          />
         ) : null}
 
       </View>
@@ -612,42 +485,6 @@ const styles = StyleSheet.create({
     paddingTop: 22,
     paddingBottom: 16,
   },
-  atlasToggleDock: {
-    position: "absolute",
-    top: 22,
-    right: 24,
-    zIndex: 120,
-  },
-  atlasToggle: {
-    position: "relative",
-    width: 44,
-    height: 44,
-    borderRadius: 999,
-    backgroundColor: "rgba(17, 26, 43, 0.82)",
-    borderWidth: 1,
-    borderColor: "rgba(146,229,255,0.24)",
-    justifyContent: "center",
-    alignItems: "center",
-    overflow: "hidden",
-    shadowColor: "#84ECFF",
-    shadowOpacity: 0.16,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 0 },
-    zIndex: 90,
-  },
-  atlasToggleOpen: {
-    backgroundColor: "rgba(20, 30, 49, 0.92)",
-    borderColor: "rgba(244,248,255,0.28)",
-  },
-  atlasToggleIconLayer: {
-    position: "absolute",
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   centerpiece: {
     alignItems: "center",
     justifyContent: "center",
@@ -656,6 +493,21 @@ const styles = StyleSheet.create({
     alignSelf: "center",
     position: "relative",
     zIndex: 40,
+  },
+  chatTopCanopy: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 330,
+    zIndex: 28,
+    backgroundImage:
+      "linear-gradient(180deg, rgba(8, 11, 20, 0.98) 0%, rgba(9, 16, 29, 0.9) 30%, rgba(9, 16, 29, 0.54) 58%, rgba(8, 11, 20, 0.16) 82%, rgba(8, 11, 20, 0) 100%)",
+  },
+  chatTopCanopyCompact: {
+    height: 250,
+    backgroundImage:
+      "linear-gradient(180deg, rgba(8, 11, 20, 0.98) 0%, rgba(9, 16, 29, 0.88) 32%, rgba(9, 16, 29, 0.48) 62%, rgba(8, 11, 20, 0.12) 84%, rgba(8, 11, 20, 0) 100%)",
   },
   orbModeShell: {
     alignItems: "center",
@@ -693,11 +545,22 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   responsePreview: {
-    maxWidth: 420,
+    maxWidth: 720,
     color: "#C7D5F3",
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 18,
+    lineHeight: 27,
     textAlign: "center",
+  },
+  responsePreviewDock: {
+    position: "absolute",
+    left: 24,
+    right: 24,
+    bottom: 156,
+    alignItems: "center",
+    zIndex: 26,
+  },
+  responsePreviewDockCompact: {
+    bottom: 144,
   },
   footer: {
     position: "absolute",
@@ -714,85 +577,5 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 10,
-  },
-  speakButtonWrap: {
-    height: 52,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 26,
-  },
-  speakButtonSpacer: {
-    height: 78,
-  },
-  speakButton: {
-    width: 52,
-    height: 52,
-    borderRadius: 999,
-    backgroundColor: "#0D1321",
-    borderWidth: 1,
-    borderColor: "rgba(146, 229, 255, 0.2)",
-    justifyContent: "center",
-    alignItems: "center",
-    overflow: "visible",
-    shadowColor: "#84ECFF",
-    shadowOpacity: 0.16,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  speakButtonRing: {
-    position: "absolute",
-    borderRadius: 999,
-    shadowColor: "#84ECFF",
-    shadowOpacity: 0.18,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  speakButtonRingOuter: {
-    width: 86,
-    height: 86,
-    left: -17,
-    top: -17,
-    backgroundColor: "rgba(132, 236, 255, 0.03)",
-  },
-  speakButtonRingThird: {
-    width: 76,
-    height: 76,
-    left: -12,
-    top: -12,
-    backgroundColor: "rgba(132, 236, 255, 0.052)",
-  },
-  speakButtonRingSecond: {
-    width: 68,
-    height: 68,
-    left: -8,
-    top: -8,
-    backgroundColor: "rgba(132, 236, 255, 0.08)",
-  },
-  speakButtonRingFirst: {
-    width: 60,
-    height: 60,
-    left: -4,
-    top: -4,
-    backgroundColor: "rgba(132, 236, 255, 0.12)",
-  },
-  speakButtonInnerGlow: {
-    position: "absolute",
-    inset: 4,
-    borderRadius: 999,
-    backgroundColor: "rgba(132, 236, 255, 0.14)",
-    shadowColor: "#84ECFF",
-    shadowOpacity: 0.34,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  speakButtonPressed: {
-    transform: [{ scale: 0.97 }],
-    opacity: 0.92,
-  },
-  speakButtonListening: {
-    borderColor: "rgba(132, 236, 255, 0.52)",
-    backgroundColor: "#101A2B",
-    shadowOpacity: 0.28,
-    shadowRadius: 24,
   },
 });

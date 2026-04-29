@@ -73,6 +73,18 @@ async def memory_consolidate(user_id: str) -> dict[str, object]:
     }
 
 
+@router.post("/backfill/{user_id}")
+async def memory_backfill(user_id: str, limit: int = 80) -> dict[str, object]:
+    memory = get_memory_service()
+    result = await memory.backfill_semantics_from_episodes(user_id=user_id, limit=limit)
+    return {
+        "user_id": user_id,
+        "status": "ok",
+        "backfill": result,
+        "layers": await memory.stats(user_id),
+    }
+
+
 @router.get("/evals/{user_id}")
 async def memory_evals(user_id: str) -> dict[str, object]:
     memory = get_memory_service()

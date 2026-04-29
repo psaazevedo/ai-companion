@@ -11,6 +11,7 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
 } from "react-native";
 
 import type { ConversationTurn } from "@/hooks/useConversationFeed";
@@ -18,13 +19,9 @@ import type { ConversationTurn } from "@/hooks/useConversationFeed";
 const INPUT_MIN_HEIGHT = 50;
 const INPUT_MAX_HEIGHT = 156;
 const LENS_MIN_ITEM_HEIGHT = 300;
-const LENS_MAX_ITEM_HEIGHT = 620;
+const LENS_MAX_ITEM_HEIGHT = 1280;
 const LENS_PROMPT_CHARS_PER_LINE = 34;
 const LENS_ANSWER_CHARS_PER_LINE = 68;
-const LENS_STREAM_PADDING_TOP = 112;
-const LENS_STREAM_PADDING_BOTTOM = 224;
-const LENS_TOP_SPACER = 260;
-const LENS_FOCUS_Y = 430;
 
 type LensPair = {
   id: string;
@@ -72,6 +69,8 @@ export function ConversationSheet({
   onDraftChange,
   onSend,
 }: ConversationSheetProps) {
+  const { height: viewportHeight, width: viewportWidth } = useWindowDimensions();
+  const compactViewport = viewportWidth < 720 || viewportHeight < 760;
   const scrollRef = useRef<ScrollView | null>(null);
   const inputRef = useRef<TextInput | null>(null);
   const lensScrollY = useRef(new Animated.Value(0)).current;
@@ -222,7 +221,31 @@ export function ConversationSheet({
     return pairs;
   }, [isSpeaking, pendingUserText, responsePreview, showResponsePreview, turns]);
 
-  const lensLayout = useMemo(() => buildLensLayout(lensPairs), [lensPairs]);
+  const sheetTop = compactViewport ? 96 : 136;
+  const sheetBottom = compactViewport ? 96 : 112;
+  const streamPaddingTop = compactViewport ? 58 : 96;
+  const streamPaddingBottom = compactViewport ? 164 : 210;
+  const lensItemGap = compactViewport ? 72 : 88;
+  const lensLayout = useMemo(
+    () => buildLensLayout(lensPairs, viewportWidth, viewportHeight, lensItemGap),
+    [lensItemGap, lensPairs, viewportHeight, viewportWidth]
+  );
+  const lensFocusY =
+    scrollViewportHeight > 0
+      ? compactViewport
+        ? Math.min(
+            Math.max(300, scrollViewportHeight * 0.52),
+            Math.max(320, scrollViewportHeight - streamPaddingBottom - 120)
+          )
+        : Math.min(430, Math.max(320, scrollViewportHeight * 0.5))
+      : compactViewport
+        ? 300
+        : 430;
+  const firstLayout = lensLayout[0];
+  const lensTopSpacer = Math.max(
+    compactViewport ? 24 : 72,
+    Math.round(lensFocusY - streamPaddingTop - (firstLayout?.height ?? LENS_MIN_ITEM_HEIGHT) / 2)
+  );
   const lensBottomSpacer = useMemo(() => {
     const lastLayout = lensLayout[lensLayout.length - 1];
     if (!lastLayout || scrollViewportHeight <= 0) {
@@ -232,14 +255,14 @@ export function ConversationSheet({
     return Math.max(
       0,
       scrollViewportHeight -
-        LENS_FOCUS_Y -
-        LENS_STREAM_PADDING_BOTTOM -
+        lensFocusY -
+        streamPaddingBottom -
         lastLayout.height / 2
     );
-  }, [lensLayout, scrollViewportHeight]);
+  }, [lensFocusY, lensLayout, scrollViewportHeight, streamPaddingBottom]);
   const lensContentHeight =
     lensLayout.length > 0
-      ? LENS_TOP_SPACER +
+      ? lensTopSpacer +
         lensLayout[lensLayout.length - 1].offset +
         lensLayout[lensLayout.length - 1].height +
         lensBottomSpacer
@@ -252,7 +275,7 @@ export function ConversationSheet({
     const latestIndex = lensPairs.length - 1;
     const latestLayout = lensLayout[latestIndex];
     const latestOffset = latestLayout
-      ? getLensScrollTarget(latestLayout)
+      ? getLensScrollTarget(latestLayout, lensTopSpacer, lensFocusY, streamPaddingTop)
       : 0;
     setActiveLensIndex(latestIndex);
     lensScrollY.setValue(latestOffset);
@@ -265,14 +288,20 @@ export function ConversationSheet({
     }, 230);
 
     return () => clearTimeout(timeout);
-  }, [lensLayout, lensPairs.length, lensScrollY, visible]);
+  }, [lensFocusY, lensLayout, lensPairs.length, lensScrollY, lensTopSpacer, streamPaddingTop, visible]);
 
   return (
     <Animated.View
       pointerEvents={visible ? "auto" : "none"}
       style={[
         styles.modeShellWrap,
-        Platform.OS === "web" ? styles.modeShellWrapWeb : null,
+        { top: sheetTop, bottom: sheetBottom },
+        Platform.OS === "web"
+          ? ({
+              height: Math.max(240, viewportHeight - sheetTop - sheetBottom),
+              maxHeight: Math.max(240, viewportHeight - sheetTop - sheetBottom),
+            } as never)
+          : null,
         !visible ? styles.modeShellHidden : null,
         visible ? styles.modeShellVisible : null,
         {
@@ -301,10 +330,13 @@ export function ConversationSheet({
               useNativeDriver: true,
               listener: (event: { nativeEvent: { contentOffset: { y: number } } }) => {
                 const y = event.nativeEvent.contentOffset.y;
-                const focusY = y + LENS_FOCUS_Y - LENS_STREAM_PADDING_TOP;
+                const focusY = y + lensFocusY - streamPaddingTop;
                 const nextIndex = Math.max(
                   0,
-                  Math.min(lensPairs.length - 1, findClosestLensIndex(lensLayout, focusY))
+                  Math.min(
+                    lensPairs.length - 1,
+                    findClosestLensIndex(lensLayout, focusY, lensTopSpacer)
+                  )
                 );
                 if (nextIndex !== activeLensIndex) {
                   setActiveLensIndex(nextIndex);
@@ -324,7 +356,13 @@ export function ConversationSheet({
                 } as never)
               : null,
           ]}
-          contentContainerStyle={styles.streamContent}
+          contentContainerStyle={[
+            styles.streamContent,
+            {
+              paddingTop: streamPaddingTop,
+              paddingBottom: streamPaddingBottom,
+            },
+          ]}
           showsVerticalScrollIndicator={false}
         >
           {isLoading ? <Text style={styles.statusText}>Loading the thread…</Text> : null}
@@ -357,14 +395,18 @@ export function ConversationSheet({
                     activeIndex={activeLensIndex}
                     scrollY={lensScrollY}
                     layout={layout}
+                    compactViewport={compactViewport}
                     previousCenter={
-                      LENS_TOP_SPACER +
+                      lensTopSpacer +
                       (lensLayout[index - 1]?.center ?? layout.center - layout.height)
                     }
                     nextCenter={
-                      LENS_TOP_SPACER +
+                      lensTopSpacer +
                       (lensLayout[index + 1]?.center ?? layout.center + layout.height)
                     }
+                    lensTopSpacer={lensTopSpacer}
+                    lensFocusY={lensFocusY}
+                    streamPaddingTop={streamPaddingTop}
                   />
                 );
               })}
@@ -373,7 +415,7 @@ export function ConversationSheet({
         </ScrollView>
         <View pointerEvents="none" style={styles.topFade} />
 
-        <View style={styles.composerDock}>
+        <View style={[styles.composerDock, compactViewport ? styles.composerDockCompact : null]}>
           <Pressable
             onPress={() => inputRef.current?.focus()}
             style={styles.composerShell}
@@ -437,22 +479,30 @@ function LensPairView({
   activeIndex,
   scrollY,
   layout,
+  compactViewport,
   previousCenter,
   nextCenter,
+  lensTopSpacer,
+  lensFocusY,
+  streamPaddingTop,
 }: {
   pair: LensPair;
   index: number;
   activeIndex: number;
   scrollY: Animated.Value;
   layout: LensLayoutItem;
+  compactViewport: boolean;
   previousCenter: number;
   nextCenter: number;
+  lensTopSpacer: number;
+  lensFocusY: number;
+  streamPaddingTop: number;
 }) {
   const reveal = useRef(new Animated.Value(0)).current;
   const active = index === activeIndex;
-  const holdStart = LENS_TOP_SPACER + layout.offset + layout.height * 0.18;
-  const holdEnd = LENS_TOP_SPACER + layout.offset + layout.height * 0.82;
-  const focusPosition = Animated.add(scrollY, LENS_FOCUS_Y - LENS_STREAM_PADDING_TOP);
+  const holdStart = lensTopSpacer + layout.offset + layout.height * 0.18;
+  const holdEnd = lensTopSpacer + layout.offset + layout.height * 0.82;
+  const focusPosition = Animated.add(scrollY, lensFocusY - streamPaddingTop);
   const scrollFocus = focusPosition.interpolate({
     inputRange: [
       previousCenter,
@@ -478,8 +528,9 @@ function LensPairView({
     <Animated.View
       style={[
         styles.lensItem,
+        compactViewport ? styles.lensItemCompact : null,
         {
-          top: LENS_TOP_SPACER + layout.offset,
+          top: lensTopSpacer + layout.offset,
           height: layout.height,
           opacity: scrollFocus.interpolate({
             inputRange: [0, 0.5, 1],
@@ -508,9 +559,9 @@ function LensPairView({
         },
       ]}
     >
-      <View style={styles.lensExchange}>
-          <View style={styles.lensPromptPill}>
-          <Text numberOfLines={2} style={styles.lensQuestion}>
+      <View style={[styles.lensExchange, compactViewport ? styles.lensExchangeCompact : null]}>
+        <View style={[styles.lensPromptPill, compactViewport ? styles.lensPromptPillCompact : null]}>
+          <Text style={[styles.lensQuestion, compactViewport ? styles.lensQuestionCompact : null]}>
             {pair.question}
           </Text>
           {active && pair.status ? (
@@ -518,8 +569,8 @@ function LensPairView({
           ) : null}
         </View>
         <View style={styles.lensConnector} />
-        <View style={styles.lensAnswerPanel}>
-          <Text style={styles.lensAnswer}>
+        <View style={[styles.lensAnswerPanel, compactViewport ? styles.lensAnswerPanelCompact : null]}>
+          <Text style={[styles.lensAnswer, compactViewport ? styles.lensAnswerCompact : null]}>
             {pair.answer || "Still forming the answer…"}
           </Text>
         </View>
@@ -528,40 +579,64 @@ function LensPairView({
   );
 }
 
-function buildLensLayout(pairs: LensPair[]): LensLayoutItem[] {
+function buildLensLayout(
+  pairs: LensPair[],
+  viewportWidth: number,
+  viewportHeight: number,
+  itemGap: number
+): LensLayoutItem[] {
   let offset = 0;
 
   return pairs.map((pair) => {
-    const height = estimateLensItemHeight(pair);
+    const height = estimateLensItemHeight(pair, viewportWidth, viewportHeight);
     const item = {
       height,
       offset,
       center: offset + height / 2,
     };
-    offset += height;
+    offset += height + itemGap;
     return item;
   });
 }
 
-function estimateLensItemHeight(pair: LensPair) {
+function estimateLensItemHeight(
+  pair: LensPair,
+  viewportWidth: number,
+  viewportHeight: number
+) {
+  const compact = viewportWidth < 720 || viewportHeight < 760;
+  const promptCharsPerLine = compact ? 24 : LENS_PROMPT_CHARS_PER_LINE;
+  const answerCharsPerLine = compact
+    ? Math.max(30, Math.floor(viewportWidth / 16))
+    : LENS_ANSWER_CHARS_PER_LINE;
+  const minHeight = compact ? 260 : LENS_MIN_ITEM_HEIGHT;
+  const maxHeight = Math.max(
+    compact ? 620 : 760,
+    Math.min(compact ? 1180 : LENS_MAX_ITEM_HEIGHT, viewportHeight * (compact ? 1.35 : 1.42))
+  );
   const questionLines = Math.max(
     1,
-    Math.ceil(pair.question.trim().length / LENS_PROMPT_CHARS_PER_LINE)
+    Math.ceil(pair.question.trim().length / promptCharsPerLine)
   );
   const answerText = (pair.answer || "Still forming the answer…").trim();
-  const answerLines = Math.max(2, Math.ceil(answerText.length / LENS_ANSWER_CHARS_PER_LINE));
-  const contentHeight = 126 + questionLines * 20 + answerLines * 25;
-  return Math.min(Math.max(contentHeight, LENS_MIN_ITEM_HEIGHT), LENS_MAX_ITEM_HEIGHT);
+  const answerLines = Math.max(2, Math.ceil(answerText.length / answerCharsPerLine));
+  const contentHeight = (compact ? 118 : 126) + questionLines * 20 + answerLines * (compact ? 24 : 25);
+  return Math.min(Math.max(contentHeight, minHeight), maxHeight);
 }
 
-function getLensScrollTarget(item: LensLayoutItem) {
+function getLensScrollTarget(
+  item: LensLayoutItem,
+  lensTopSpacer: number,
+  lensFocusY: number,
+  streamPaddingTop: number
+) {
   return Math.max(
     0,
-    LENS_TOP_SPACER + item.center - (LENS_FOCUS_Y - LENS_STREAM_PADDING_TOP)
+    lensTopSpacer + item.center - (lensFocusY - streamPaddingTop)
   );
 }
 
-function findClosestLensIndex(layout: LensLayoutItem[], y: number) {
+function findClosestLensIndex(layout: LensLayoutItem[], y: number, lensTopSpacer: number) {
   if (layout.length === 0) {
     return 0;
   }
@@ -570,8 +645,8 @@ function findClosestLensIndex(layout: LensLayoutItem[], y: number) {
   let closestDistance = Number.POSITIVE_INFINITY;
 
   layout.forEach((item, index) => {
-    const holdStart = LENS_TOP_SPACER + item.offset + item.height * 0.18;
-    const holdEnd = LENS_TOP_SPACER + item.offset + item.height * 0.82;
+    const holdStart = lensTopSpacer + item.offset + item.height * 0.18;
+    const holdEnd = lensTopSpacer + item.offset + item.height * 0.82;
     const distance =
       y >= holdStart && y <= holdEnd
         ? 0
@@ -682,15 +757,13 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    height: 260,
-    zIndex: 6,
+    height: 300,
+    zIndex: 30,
     backgroundImage:
-      "linear-gradient(180deg, rgba(8, 11, 20, 0.76) 0%, rgba(8, 11, 20, 0.5) 26%, rgba(8, 11, 20, 0.22) 54%, rgba(8, 11, 20, 0.06) 78%, rgba(8, 11, 20, 0) 100%)",
+      "linear-gradient(180deg, rgba(8, 11, 20, 0.94) 0%, rgba(8, 11, 20, 0.72) 30%, rgba(8, 11, 20, 0.34) 62%, rgba(8, 11, 20, 0.08) 86%, rgba(8, 11, 20, 0) 100%)",
   },
   streamContent: {
     paddingHorizontal: 18,
-    paddingTop: LENS_STREAM_PADDING_TOP,
-    paddingBottom: LENS_STREAM_PADDING_BOTTOM,
     flexGrow: 1,
   },
   statusText: {
@@ -744,12 +817,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 22,
   },
+  lensItemCompact: {
+    paddingHorizontal: 8,
+  },
   lensExchange: {
     width: "78%",
     maxWidth: 680,
     minHeight: 190,
     alignItems: "center",
     justifyContent: "center",
+  },
+  lensExchangeCompact: {
+    width: "94%",
   },
   lensCard: {
     width: "88%",
@@ -789,10 +868,16 @@ const styles = StyleSheet.create({
     maxWidth: "76%",
     paddingHorizontal: 22,
     paddingVertical: 9,
-    borderRadius: 999,
+    borderRadius: 26,
     backgroundColor: "rgba(35, 22, 50, 0.96)",
     borderWidth: 1,
     borderColor: "rgba(226, 143, 255, 0.18)",
+  },
+  lensPromptPillCompact: {
+    maxWidth: "96%",
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 22,
   },
   lensKicker: {
     color: "#A9B8D3",
@@ -825,6 +910,11 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     textAlign: "center",
   },
+  lensQuestionCompact: {
+    flexShrink: 1,
+    fontSize: 13,
+    lineHeight: 19,
+  },
   lensConnector: {
     width: 1,
     height: 22,
@@ -854,12 +944,21 @@ const styles = StyleSheet.create({
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 0 },
   },
+  lensAnswerPanelCompact: {
+    width: "96%",
+    paddingHorizontal: 18,
+    paddingVertical: 16,
+  },
   lensAnswer: {
     color: "#F3F8FF",
     fontSize: 16,
     lineHeight: 23,
     fontWeight: "500",
     letterSpacing: -0.3,
+  },
+  lensAnswerCompact: {
+    fontSize: 15,
+    lineHeight: 22,
   },
   lensFootnotes: {
     position: "absolute",
@@ -1009,12 +1108,18 @@ const styles = StyleSheet.create({
     textTransform: "uppercase",
   },
   composerDock: {
-    paddingHorizontal: 18,
+    width: "78%",
+    maxWidth: 680,
+    minWidth: 0,
+    alignSelf: "center",
     paddingBottom: 10,
     paddingTop: 10,
     backgroundColor: "#080B14",
     flexShrink: 0,
     zIndex: 8,
+  },
+  composerDockCompact: {
+    width: "94%",
   },
   composerShell: {
     minHeight: 76,

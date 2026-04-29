@@ -9,7 +9,7 @@ from typing import Iterable, List, Optional
 
 from core.embeddings import EmbeddingClient, vector_literal
 from db.postgres import get_database
-from models.agent import Assessment
+from models.agent import Assessment, DialogueSignals
 from models.memory import GraphFact, RetrievedMemory
 
 
@@ -96,6 +96,11 @@ SEMANTIC_CANONICAL_FAMILIES = {
             "concise communication",
             "direct communication and concise answers",
         ],
+    },
+    "location:home": {
+        "content": "",
+        "category": "location",
+        "keywords": [],
     },
 }
 
@@ -325,6 +330,71 @@ class LayeredMemoryService:
         await self._update_dialogue_profile(user_id, episode_id, assessment)
         await self.consolidate_user(user_id)
 
+    async def user_home_location(
+        self,
+        user_id: str,
+        conversation_mode: str = "general",
+    ) -> Optional[RetrievedMemory]:
+        """Return the strongest current home-location memory, if one exists."""
+        current_mode = self._normalize_mode(conversation_mode)
+        async with self.db.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT
+                        id::text AS id,
+                        content,
+                        confidence,
+                        memory_status,
+                        source_episode_ids,
+                        valid_from,
+                        valid_to,
+                        superseded_by,
+                        archive_reason,
+                        conversation_mode,
+                        visibility_scope,
+                        allowed_modes
+                    FROM semantic_memories
+                    WHERE user_id = %s
+                      AND fact_key = 'location:home'
+                      AND memory_status IN ('active', 'pinned')
+                      AND (
+                        visibility_scope = 'global'
+                        OR %s = ANY(allowed_modes)
+                      )
+                    ORDER BY
+                        CASE WHEN memory_status = 'pinned' THEN 0 ELSE 1 END,
+                        confidence DESC,
+                        reinforcement_count DESC,
+                        last_updated DESC
+                    LIMIT 1
+                    """,
+                    (user_id, current_mode),
+                )
+                row = await cur.fetchone()
+
+        if not row:
+            return None
+
+        return RetrievedMemory(
+            kind="semantic",
+            content=str(row["content"]),
+            score=1.35,
+            source_id=str(row["id"]),
+            confidence=float(row["confidence"]) if row.get("confidence") is not None else None,
+            memory_status=str(row["memory_status"]) if row.get("memory_status") else None,
+            source_episode_ids=[str(value) for value in list(row.get("source_episode_ids") or [])],
+            valid_from=row["valid_from"].isoformat() if row.get("valid_from") else None,
+            valid_to=row["valid_to"].isoformat() if row.get("valid_to") else None,
+            superseded_by=str(row["superseded_by"]) if row.get("superseded_by") else None,
+            archive_reason=str(row["archive_reason"]) if row.get("archive_reason") else None,
+            conversation_mode=str(row.get("conversation_mode") or "general"),
+            visibility_scope=str(row.get("visibility_scope") or "global"),
+            allowed_modes=[str(value) for value in list(row.get("allowed_modes") or [])],
+            use="silent",
+            relevance_reason="identity/location memory for local context",
+        )
+
     async def consolidate_user(self, user_id: str) -> None:
         async with self.db.connection() as conn:
             async with conn.cursor() as cur:
@@ -357,6 +427,80 @@ class LayeredMemoryService:
         await self._archive_stale_semantics(user_id)
         await self._archive_stale_procedurals(user_id)
         await self._weaken_stale_graph_edges(user_id)
+
+    async def backfill_semantics_from_episodes(self, user_id: str, limit: int = 80) -> dict[str, int]:
+        """
+        Re-run the current deterministic extractors against stored episodes.
+
+        This is intentionally different from nightly consolidation: consolidation
+        looks for repeated patterns, while backfill repairs facts we now know how
+        to extract but may have missed when the episode was first stored.
+        """
+        capped_limit = max(1, min(int(limit), 500))
+        async with self.db.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT
+                        id::text AS id,
+                        user_input,
+                        emotional_tone,
+                        dialogue_signals,
+                        visibility_scope,
+                        allowed_modes,
+                        conversation_mode,
+                        restricted_reason
+                    FROM episodes
+                    WHERE user_id = %s
+                    ORDER BY timestamp DESC
+                    LIMIT %s
+                    """,
+                    (user_id, capped_limit),
+                )
+                episodes = await cur.fetchall()
+
+        semantic_count = 0
+        procedural_count = 0
+        graph_count = 0
+
+        for episode in episodes:
+            assessment = Assessment(
+                stakes="low",
+                novelty="low",
+                emotional_tone=str(episode.get("emotional_tone") or "neutral"),
+                dialogue_signals=self._dialogue_signals_from_episode(episode.get("dialogue_signals")),
+            )
+            scope = MemoryScope(
+                conversation_mode=str(episode.get("conversation_mode") or "general"),
+                visibility_scope=str(episode.get("visibility_scope") or "global"),
+                allowed_modes=tuple(str(mode) for mode in list(episode.get("allowed_modes") or [])),
+                restricted_reason=episode.get("restricted_reason"),
+            )
+            user_input = str(episode.get("user_input") or "")
+            episode_id = str(episode["id"])
+
+            semantic_candidates = self._extract_semantic_candidates(user_input, assessment)
+            procedural_candidates = self._extract_procedural_candidates(user_input, assessment)
+            graph_facts = self._extract_graph_facts(user_input, semantic_candidates)
+
+            await self._upsert_semantic_candidates(user_id, semantic_candidates, episode_id, scope)
+            await self._upsert_procedural_candidates(user_id, procedural_candidates, episode_id, scope)
+            await self._update_graph(user_id, graph_facts, episode_id, scope)
+
+            semantic_count += len(semantic_candidates)
+            procedural_count += len(procedural_candidates)
+            graph_count += len(graph_facts)
+
+        await self._normalize_legacy_semantic_keys(user_id)
+        await self._fold_semantic_duplicate_families(user_id)
+        await self._resolve_semantic_conflicts(user_id)
+
+        return {
+            "episodes_scanned": len(episodes),
+            "semantic_candidates": semantic_count,
+            "procedural_candidates": procedural_count,
+            "graph_facts": graph_count,
+        }
 
     async def _update_dialogue_profile(
         self,
@@ -783,8 +927,8 @@ class LayeredMemoryService:
                     FROM dialogue_profiles
                     WHERE user_id = %s
                     """,
-                    (user_id,),
-                )
+                        (user_id,),
+                    )
                 row = await cur.fetchone()
 
         if not row:
@@ -817,6 +961,20 @@ class LayeredMemoryService:
             "last_observed_episode_id": row["last_observed_episode_id"],
             "last_updated": row["last_updated"].isoformat() if row["last_updated"] else None,
         }
+
+    def _dialogue_signals_from_episode(self, raw_signals: object) -> DialogueSignals:
+        if isinstance(raw_signals, DialogueSignals):
+            return raw_signals
+        if isinstance(raw_signals, dict):
+            return DialogueSignals.model_validate(raw_signals)
+        if isinstance(raw_signals, str) and raw_signals:
+            try:
+                parsed = json.loads(raw_signals)
+            except json.JSONDecodeError:
+                return DialogueSignals()
+            if isinstance(parsed, dict):
+                return DialogueSignals.model_validate(parsed)
+        return DialogueSignals()
 
     async def stats(self, user_id: str) -> dict[str, int]:
         async with self.db.connection() as conn:
@@ -3336,7 +3494,7 @@ class LayeredMemoryService:
     def _canonicalize_semantic_candidate(self, candidate: SemanticCandidate) -> SemanticCandidate:
         normalized_content = self._normalize_semantic_text(candidate.content)
 
-        if candidate.fact_key in SEMANTIC_CANONICAL_FAMILIES:
+        if candidate.fact_key in SEMANTIC_CANONICAL_FAMILIES and SEMANTIC_CANONICAL_FAMILIES[candidate.fact_key].get("content"):
             family = SEMANTIC_CANONICAL_FAMILIES[candidate.fact_key]
             return SemanticCandidate(
                 category=str(family["category"]),
@@ -3367,6 +3525,16 @@ class LayeredMemoryService:
     ) -> List[SemanticCandidate]:
         lowered = text.lower()
         candidates: List[SemanticCandidate] = []
+        home_location = self._extract_home_location(text)
+        if home_location:
+            candidates.append(
+                SemanticCandidate(
+                    category="location",
+                    fact_key="location:home",
+                    content=f"User lives in {home_location}.",
+                    confidence=0.94,
+                )
+            )
 
         multi_patterns = [
             (r"\bmy name is ([a-z][a-z\s'-]+)", "identity", "identity:name", "User's name is {value}."),
@@ -3584,6 +3752,17 @@ class LayeredMemoryService:
                         source_type="person",
                         target_type="procedure",
                         weight=0.56,
+                    )
+                )
+            elif candidate.fact_key == "location:home":
+                facts.append(
+                    GraphFact(
+                        source_label="User",
+                        target_label=self._extract_location_from_content(candidate.content) or self._extract_fact_target(candidate.content),
+                        relation="lives_in",
+                        source_type="person",
+                        target_type="place",
+                        weight=0.72,
                     )
                 )
 
@@ -3836,6 +4015,8 @@ class LayeredMemoryService:
             return self._atlas_phrase_label(content, "User is building ", "User is working on ")
         if fact_key == "identity:name":
             return content.replace("User's name is ", "").rstrip(".")
+        if fact_key == "location:home":
+            return self._atlas_phrase_label(content, "User lives in ")
         if fact_key == "preference:communication_style":
             return "Direct Communication"
         if fact_key == "preference:stress_response_style":
@@ -3862,6 +4043,8 @@ class LayeredMemoryService:
         if fact_key.startswith("project:"):
             return "project"
         if fact_key.startswith("identity:"):
+            return "identity"
+        if fact_key.startswith("location:"):
             return "identity"
         if fact_key.startswith("preference:"):
             return "preference"
@@ -3892,7 +4075,7 @@ class LayeredMemoryService:
         return compact.title() if compact.islower() else compact
 
     def _extract_fact_target(self, content: str) -> str:
-        cleaned = re.sub(r"^User(?:'s goal is to| is (?:working on|building)| prefers)\s+", "", content)
+        cleaned = re.sub(r"^User(?:'s goal is to| is (?:working on|building)| prefers| lives in)\s+", "", content)
         cleaned = re.sub(r"^When the user is stressed,\s+", "", cleaned)
         return self._normalize_graph_label(cleaned.rstrip("."))
 
@@ -4013,6 +4196,56 @@ class LayeredMemoryService:
 
     def _clean_fact_value(self, value: str) -> str:
         return re.sub(r"\s+", " ", value).strip(" .,!?:;\"'")
+
+    def _extract_home_location(self, text: str) -> Optional[str]:
+        patterns = [
+            r"\bi\s+(?:do\s+)?(?:currently\s+)?live\s+in\s+([^.!?]+?)(?:,\s*not\b|\s+not\b|[.!?]|$)",
+            r"\bmy\s+(?:current\s+)?location\s+is\s+([^.!?]+?)(?:,\s*not\b|\s+not\b|[.!?]|$)",
+            r"\bmy\s+home\s+is\s+in\s+([^.!?]+?)(?:,\s*not\b|\s+not\b|[.!?]|$)",
+            r"\bi(?:'m| am)\s+based\s+in\s+([^.!?]+?)(?:,\s*not\b|\s+not\b|[.!?]|$)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            location = self._normalize_location(match.group(1))
+            if self._looks_like_location(location):
+                return location
+        return None
+
+    def _normalize_location(self, value: str) -> str:
+        cleaned = self._clean_fact_value(value)
+        cleaned = re.sub(r"\b(?:actually|currently|right now)\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,")
+        parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+        if not parts:
+            return ""
+        normalized_parts = []
+        for part in parts[:3]:
+            if len(part) <= 3 and part.isupper():
+                normalized_parts.append(part)
+            else:
+                normalized_parts.append(part.title() if part.islower() else part)
+        return ", ".join(normalized_parts)
+
+    def _looks_like_location(self, value: str) -> bool:
+        if not value or len(value) < 3:
+            return False
+        lowered = value.lower()
+        if "," in value:
+            return True
+        location_terms = {
+            "california", "pleasanton", "new york", "texas", "florida", "washington",
+            "oregon", "nevada", "arizona", "colorado", "massachusetts", "illinois",
+            "canada", "brazil", "portugal", "london", "paris", "berlin", "tokyo",
+        }
+        return any(term in lowered for term in location_terms)
+
+    def _extract_location_from_content(self, content: str) -> Optional[str]:
+        match = re.search(r"^User lives in (.+?)\.$", content)
+        if not match:
+            return None
+        return self._normalize_location(match.group(1))
 
     def _clean_sentence(self, text: str) -> str:
         return re.sub(r"\s+", " ", text).strip()

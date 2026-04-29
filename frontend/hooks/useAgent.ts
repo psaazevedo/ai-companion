@@ -25,6 +25,7 @@ export function useAgent() {
   const [responsePreview, setResponsePreview] = useState("");
   const responsePreviewRef = useRef("");
   const soundRef = useRef<Audio.Sound | null>(null);
+  const webAudioRef = useRef<HTMLAudioElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldReconnectRef = useRef(true);
@@ -110,7 +111,7 @@ export function useAgent() {
           mediaSourceNodeRef,
           silenceCheckFrameRef,
         });
-        void stopSpeakingOutput(soundRef, playbackTokenRef);
+        void stopSpeakingOutput(soundRef, webAudioRef, playbackTokenRef);
         setConnected(false);
         setConversationState(shouldReconnectRef.current ? "reconnecting" : "error");
         setListening(false);
@@ -167,7 +168,7 @@ export function useAgent() {
         }
 
         if (payload.type === "interrupted") {
-          await stopSpeakingOutput(soundRef, playbackTokenRef);
+          await stopSpeakingOutput(soundRef, webAudioRef, playbackTokenRef);
           stopAudioMonitoring({
             analyserNodeRef,
             audioContextRef,
@@ -219,7 +220,7 @@ export function useAgent() {
         }
 
         if (payload.type === "response_start") {
-          const playbackToken = await resetSpeechChannel(soundRef, playbackTokenRef);
+          const playbackToken = await resetSpeechChannel(soundRef, webAudioRef, playbackTokenRef);
           activeStreamPlaybackTokenRef.current = playbackToken;
           pendingSpeechSegmentsRef.current = 0;
           streamedSentenceCountRef.current = 0;
@@ -272,6 +273,7 @@ export function useAgent() {
             audio: payload.audio,
             audioMimeType: payload.audioMimeType ?? null,
             soundRef,
+            webAudioRef,
             sentence,
             streamAudioQueueRef,
           });
@@ -317,6 +319,7 @@ export function useAgent() {
               audio: payload.audio ?? null,
               audioMimeType: payload.audioMimeType ?? null,
               soundRef,
+              webAudioRef,
               sentence: finalText.trim(),
               streamAudioQueueRef,
             });
@@ -346,7 +349,7 @@ export function useAgent() {
           pauseToleranceSecondsRef.current = payload.pauseToleranceSeconds;
         }
 
-        const playbackToken = await resetSpeechChannel(soundRef, playbackTokenRef);
+        const playbackToken = await resetSpeechChannel(soundRef, webAudioRef, playbackTokenRef);
         activeStreamPlaybackTokenRef.current = null;
         pendingSpeechSegmentsRef.current = 0;
         streamCompleteRef.current = false;
@@ -372,26 +375,33 @@ export function useAgent() {
           }
         };
 
-          if (payload.audio) {
+        if (payload.audio) {
           try {
-            const mimeType = payload.audioMimeType ?? "audio/mpeg";
-            const uri = `data:${mimeType};base64,${payload.audio}`;
-            const { sound } = await Audio.Sound.createAsync({ uri });
-            soundRef.current = sound;
-            sound.setOnPlaybackStatusUpdate((status) => {
-              if (status.isLoaded && status.didJustFinish) {
-                handlePlaybackComplete();
-              }
+            await playAudioSegment({
+              audio: payload.audio,
+              audioMimeType: payload.audioMimeType ?? null,
+              playbackToken,
+              playbackTokenRef,
+              soundRef,
+              webAudioRef,
             });
-            await sound.playAsync();
+            handlePlaybackComplete();
             return;
           } catch (error) {
-            speakFallback(payload.text ?? "", playbackToken, playbackTokenRef, handlePlaybackComplete);
+            if (shouldUseSpeechFallback()) {
+              speakFallback(payload.text ?? "", playbackToken, playbackTokenRef, handlePlaybackComplete);
+            } else {
+              handlePlaybackComplete();
+            }
             return;
           }
         }
 
-        speakFallback(payload.text ?? "", playbackToken, playbackTokenRef, handlePlaybackComplete);
+        if (shouldUseSpeechFallback()) {
+          speakFallback(payload.text ?? "", playbackToken, playbackTokenRef, handlePlaybackComplete);
+        } else {
+          handlePlaybackComplete();
+        }
       };
     };
 
@@ -415,7 +425,7 @@ export function useAgent() {
         mediaSourceNodeRef,
         silenceCheckFrameRef,
       });
-      void stopSpeakingOutput(soundRef, playbackTokenRef);
+      void stopSpeakingOutput(soundRef, webAudioRef, playbackTokenRef);
     };
   }, [
     bumpMemoryRefreshKey,
@@ -442,6 +452,7 @@ export function useAgent() {
         setThinking,
         socketRef,
         soundRef,
+        webAudioRef,
       });
     }
 
@@ -715,6 +726,7 @@ export function useAgent() {
         setThinking,
         socketRef,
         soundRef,
+        webAudioRef,
       });
     }
 
@@ -760,12 +772,15 @@ export function useAgent() {
 
 async function resetSpeechChannel(
   soundRef: MutableRefObject<Audio.Sound | null>,
+  webAudioRef: MutableRefObject<HTMLAudioElement | null>,
   playbackTokenRef: MutableRefObject<number>
 ) {
   playbackTokenRef.current += 1;
   const playbackToken = playbackTokenRef.current;
   const activeSound = soundRef.current;
+  const activeWebAudio = webAudioRef.current;
   soundRef.current = null;
+  webAudioRef.current = null;
 
   if (activeSound) {
     try {
@@ -775,6 +790,12 @@ async function resetSpeechChannel(
     try {
       await activeSound.unloadAsync();
     } catch {}
+  }
+
+  if (activeWebAudio) {
+    activeWebAudio.pause();
+    activeWebAudio.removeAttribute("src");
+    activeWebAudio.load();
   }
 
   if (Platform.OS === "web" && typeof window !== "undefined" && "speechSynthesis" in window) {
@@ -790,9 +811,10 @@ async function resetSpeechChannel(
 
 async function stopSpeakingOutput(
   soundRef: MutableRefObject<Audio.Sound | null>,
+  webAudioRef: MutableRefObject<HTMLAudioElement | null>,
   playbackTokenRef: MutableRefObject<number>
 ) {
-  await resetSpeechChannel(soundRef, playbackTokenRef);
+  await resetSpeechChannel(soundRef, webAudioRef, playbackTokenRef);
 }
 
 function queueStreamingSpeechSegment({
@@ -802,6 +824,7 @@ function queueStreamingSpeechSegment({
   playbackToken,
   playbackTokenRef,
   soundRef,
+  webAudioRef,
   sentence,
   streamAudioQueueRef,
 }: {
@@ -811,11 +834,16 @@ function queueStreamingSpeechSegment({
   playbackToken: number;
   playbackTokenRef: MutableRefObject<number>;
   soundRef: MutableRefObject<Audio.Sound | null>;
+  webAudioRef: MutableRefObject<HTMLAudioElement | null>;
   sentence: string;
   streamAudioQueueRef: MutableRefObject<Promise<void>>;
 }) {
   if (!audio) {
-    speakFallback(sentence, playbackToken, playbackTokenRef, onSegmentComplete, false);
+    if (shouldUseSpeechFallback()) {
+      speakFallback(sentence, playbackToken, playbackTokenRef, onSegmentComplete, false);
+    } else {
+      onSegmentComplete();
+    }
     return;
   }
 
@@ -827,15 +855,16 @@ function queueStreamingSpeechSegment({
       }
 
       try {
-        await playStreamingAudioSegment({
+        await playAudioSegment({
           audio,
           audioMimeType,
           playbackToken,
           playbackTokenRef,
           soundRef,
+          webAudioRef,
         });
       } catch {
-        if (playbackTokenRef.current === playbackToken) {
+        if (playbackTokenRef.current === playbackToken && shouldUseSpeechFallback()) {
           await new Promise<void>((resolve) => {
             speakFallback(sentence, playbackToken, playbackTokenRef, resolve, false);
           });
@@ -846,21 +875,38 @@ function queueStreamingSpeechSegment({
     });
 }
 
-async function playStreamingAudioSegment({
+function shouldUseSpeechFallback() {
+  return Platform.OS !== "web";
+}
+
+async function playAudioSegment({
   audio,
   audioMimeType,
   playbackToken,
   playbackTokenRef,
   soundRef,
+  webAudioRef,
 }: {
   audio: string;
   audioMimeType: string | null;
   playbackToken: number;
   playbackTokenRef: MutableRefObject<number>;
   soundRef: MutableRefObject<Audio.Sound | null>;
+  webAudioRef: MutableRefObject<HTMLAudioElement | null>;
 }) {
   const mimeType = audioMimeType ?? "audio/wav";
   const uri = `data:${mimeType};base64,${audio}`;
+
+  if (Platform.OS === "web" && typeof window !== "undefined" && "Audio" in window) {
+    await playWebAudioSegment({
+      uri,
+      playbackToken,
+      playbackTokenRef,
+      webAudioRef,
+    });
+    return;
+  }
+
   const { sound } = await Audio.Sound.createAsync({ uri });
 
   if (playbackTokenRef.current !== playbackToken) {
@@ -913,6 +959,61 @@ async function playStreamingAudioSegment({
   } catch {}
 }
 
+async function playWebAudioSegment({
+  uri,
+  playbackToken,
+  playbackTokenRef,
+  webAudioRef,
+}: {
+  uri: string;
+  playbackToken: number;
+  playbackTokenRef: MutableRefObject<number>;
+  webAudioRef: MutableRefObject<HTMLAudioElement | null>;
+}) {
+  const audio = new window.Audio(uri);
+  audio.preload = "auto";
+
+  if (playbackTokenRef.current !== playbackToken) {
+    return;
+  }
+
+  webAudioRef.current = audio;
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.onabort = null;
+    };
+
+    const finish = (error?: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      if (webAudioRef.current === audio) {
+        webAudioRef.current = null;
+      }
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    };
+
+    audio.onended = () => finish();
+    audio.onabort = () => finish();
+    audio.onerror = () => finish(new Error("Web audio playback failed."));
+
+    audio.play().catch((error) => {
+      finish(error instanceof Error ? error : new Error("Web audio playback failed."));
+    });
+  });
+}
+
 function maybeFinishStreamPlayback({
   playbackToken,
   playbackTokenRef,
@@ -952,6 +1053,7 @@ async function interruptCurrentResponse({
   setThinking,
   socketRef,
   soundRef,
+  webAudioRef,
 }: {
   playbackTokenRef: MutableRefObject<number>;
   setConversationState: (value: ConversationState) => void;
@@ -960,8 +1062,9 @@ async function interruptCurrentResponse({
   setThinking: (value: boolean) => void;
   socketRef: MutableRefObject<WebSocket | null>;
   soundRef: MutableRefObject<Audio.Sound | null>;
+  webAudioRef: MutableRefObject<HTMLAudioElement | null>;
 }) {
-  await stopSpeakingOutput(soundRef, playbackTokenRef);
+  await stopSpeakingOutput(soundRef, webAudioRef, playbackTokenRef);
   setConversationState("interrupting");
   setThinking(false);
   setSpeaking(false);

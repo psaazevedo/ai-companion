@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.routes.agent import router as agent_router
 from api.routes.health import router as health_router
 from api.routes.memory import router as memory_router
 from api.routes.proactive import router as proactive_router
@@ -26,6 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(agent_router)
 app.include_router(health_router)
 app.include_router(memory_router)
 app.include_router(proactive_router)
